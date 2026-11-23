@@ -12,6 +12,15 @@ fn get<'py>(general: &Bound<'py, PyAny>, key: &str) -> PyResult<Option<Bound<'py
     Ok((!value.is_none()).then_some(value))
 }
 
+/// `general_settings[key]` wherever the key is written, a `None` it holds included, since the
+/// proxy reads an allowlist by `key in general_settings`.
+fn written<'py>(general: &Bound<'py, PyAny>, key: &str) -> PyResult<Option<Bound<'py, PyAny>>> {
+    match general.contains(key)? {
+        true => general.get_item(key).map(Some),
+        false => Ok(None),
+    }
+}
+
 /// `general_settings.role_permissions`: `RoleBasedPermissions` models or the dicts the config holds.
 fn role_permissions(general: &Bound<'_, PyAny>) -> PyResult<Option<Box<[RolePermissions]>>> {
     let Some(value) = get(general, "role_permissions")? else {
@@ -56,7 +65,10 @@ pub(crate) fn jwt_auth(litellm_jwtauth: &Bound<'_, PyAny>) -> PyResult<JwtAuthSe
 }
 
 /// The `general_settings` keys the auth core reads.
-const AUTH_KEYS: [&str; 6] = [
+const AUTH_KEYS: [&str; 9] = [
+    "allowed_ips",
+    "use_x_forwarded_for",
+    "allowed_routes",
     "enable_jwt_auth",
     "enable_oauth2_auth",
     "enable_oauth2_proxy_auth",
@@ -75,7 +87,7 @@ fn general_settings(
     let py = general.py();
     let selected = PyDict::new(py);
     for key in AUTH_KEYS {
-        let Some(value) = get(general, key)? else {
+        let Some(value) = written(general, key)? else {
             continue;
         };
         let alone = PyDict::new(py);

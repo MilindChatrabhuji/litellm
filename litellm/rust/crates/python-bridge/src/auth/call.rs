@@ -8,6 +8,7 @@ use litellm_gateway_auth_core::{
         jwt::{self, Expected, KeyMappingWrite, KeyOrigin, MappedJwt, MappedKey},
         key::{CachedTeam, KeyRecord, Keyed},
     },
+    client_address::Origin,
     identity::{
         jwt::{
             AgentMode, AliasRead, ClaimIdentity, IdentityRead, JwtIdentity, JwtMapping,
@@ -38,6 +39,23 @@ use super::{
 
 fn presented_token(token: &Bound<'_, PyAny>) -> PyResult<Option<Token>> {
     Ok(token.extract::<Option<String>>()?.map(Token::new))
+}
+
+/// `request.client.host`, unset for a request with no client.
+fn client_host(request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    let client = request.getattr("client")?;
+    if client.is_none() {
+        return Ok(None);
+    }
+    client.getattr("host")?.extract()
+}
+
+/// `request.headers.get("x-forwarded-for")`
+fn forwarded_for(request: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    request
+        .getattr("headers")?
+        .call_method1("get", ("x-forwarded-for",))?
+        .extract()
 }
 
 /// The request facts Python passes in, read from a frozen dataclass (`core.AuthRequest`).
@@ -1322,6 +1340,33 @@ impl AuthCall {
     #[staticmethod]
     fn is_public_route(route: &str, settings: &AuthSettings) -> bool {
         core::is_public_route(route, &settings.0)
+    }
+
+    /// `request` is the starlette request, whose client and headers are read only when the
+    /// proxy has an address allowlist, as `_check_valid_ip` read them.
+    #[staticmethod]
+    fn check_request(
+        route: &str,
+        request: &Bound<'_, PyAny>,
+        settings: &AuthSettings,
+    ) -> PyResult<Option<DenialView>> {
+        let (peer, forwarded_for) = if settings.0.client_addresses.reads_address() {
+            (client_host(request)?, forwarded_for(request)?)
+        } else {
+            (None, None)
+        };
+        let origin = Origin {
+            peer: peer.as_deref(),
+            forwarded_for: forwarded_for.as_deref(),
+        };
+        Ok(core::check_request(route, origin, &settings.0)
+            .err()
+            .map(|denial| denial.public().into()))
+    }
+
+    #[staticmethod]
+    fn is_route_allowed_on_proxy(route: &str, settings: &AuthSettings) -> bool {
+        settings.0.exposed_routes.permits(route).is_ok()
     }
 
     #[staticmethod]

@@ -12,7 +12,7 @@ not covered here. All three reconfigure the whole proxy: /cache/settings persist
 it receives into a row that outranks the YAML cache_params and is re-applied on a timer,
 /config_overrides/hashicorp_vault swaps the process-wide secret manager, and
 /add/allowed_ip mutates the live general_settings["allowed_ips"] that
-auth_utils._check_valid_ip reads, so the first call locks every other client out of the
+auth_utils.pre_db_read_auth_checks reads, so the first call locks every other client out of the
 shared proxy. The allowlist is an exact string match with no CIDR support, and no route
 reports the caller's address as the proxy sees it, so a test cannot allowlist itself
 first; /delete/allowed_ip sits behind the same auth dependency, so the cleanup is locked

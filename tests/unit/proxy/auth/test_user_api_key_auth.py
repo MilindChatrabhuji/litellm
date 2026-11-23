@@ -7,7 +7,7 @@ import json
 import logging
 import time
 import warnings
-from typing import Dict, Final, List, Mapping, Optional
+from typing import Final, Mapping
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -390,13 +390,6 @@ async def test_overall_app_budget_applies_without_customer_or_app_headers(
     assert not database.litellm_appcustomerorgtable.rows and not database.litellm_appcustomermembertable.rows
 
 
-class Request:
-    def __init__(self, client_ip: Optional[str] = None, headers: Optional[dict] = None):
-        self.client = MagicMock()
-        self.client.host = client_ip
-        self.headers: Dict[str, str] = {}
-
-
 def test_custom_header_auth_logs_names_without_provider_or_gateway_credentials(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -670,57 +663,6 @@ async def test_user_access_group_rules_are_enforced_at_central_authorization(
             await _authorize_authenticated_request(
                 principal, request, {"model": model}, "/chat/completions", "synthetic", force_virtual_key_checks=True
             )
-
-
-@pytest.mark.parametrize(
-    "allowed_ips, client_ip, expected_result",
-    [
-        (None, "127.0.0.1", True),  # No IP restrictions, should be allowed
-        (["127.0.0.1"], "127.0.0.1", True),  # IP in allowed list
-        (["192.168.1.1"], "127.0.0.1", False),  # IP not in allowed list
-        ([], "127.0.0.1", False),  # Empty allowed list, no IP should be allowed
-        (["192.168.1.1", "10.0.0.1"], "10.0.0.1", True),  # IP in allowed list
-        (
-            ["192.168.1.1"],
-            None,
-            False,
-        ),  # Request with no client IP should not be allowed
-    ],
-)
-def test_check_valid_ip(allowed_ips: Optional[List[str]], client_ip: Optional[str], expected_result: bool):
-    from litellm.proxy.auth.auth_utils import _check_valid_ip
-
-    request = Request(client_ip)
-
-    assert _check_valid_ip(allowed_ips, request)[0] == expected_result  # type: ignore
-
-
-# test x-forwarder for is used when user has opted in
-
-
-@pytest.mark.parametrize(
-    "allowed_ips, client_ip, expected_result",
-    [
-        (None, "127.0.0.1", True),  # No IP restrictions, should be allowed
-        (["127.0.0.1"], "127.0.0.1", True),  # IP in allowed list
-        (["192.168.1.1"], "127.0.0.1", False),  # IP not in allowed list
-        ([], "127.0.0.1", False),  # Empty allowed list, no IP should be allowed
-        (["192.168.1.1", "10.0.0.1"], "10.0.0.1", True),  # IP in allowed list
-        (
-            ["192.168.1.1"],
-            None,
-            False,
-        ),  # Request with no client IP should not be allowed
-    ],
-)
-def test_check_valid_ip_sent_with_x_forwarded_for(
-    allowed_ips: Optional[List[str]], client_ip: Optional[str], expected_result: bool
-):
-    from litellm.proxy.auth.auth_utils import _check_valid_ip
-
-    request = Request(client_ip, headers={"X-Forwarded-For": client_ip})
-
-    assert _check_valid_ip(allowed_ips, request, use_x_forwarded_for=True)[0] == expected_result  # type: ignore
 
 
 @pytest.mark.asyncio
@@ -1220,7 +1162,7 @@ async def test_auth_not_connected_to_db(monkeypatch: pytest.MonkeyPatch):
 
 def _assert_api_key_from_custom_header(headers, custom_header_name, expected_api_key):
     verbose_proxy_logger.setLevel(logging.DEBUG)
-    request = MagicMock(spec=Request)
+    request = MagicMock(spec=StarletteRequest)
     request.headers = headers
     api_key = get_api_key_from_custom_header(request=request, custom_litellm_key_header_name=custom_header_name)
     assert api_key == expected_api_key

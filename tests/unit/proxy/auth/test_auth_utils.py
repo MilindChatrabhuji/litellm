@@ -21,6 +21,7 @@ from litellm.proxy._types import (
     ProxyException,
     UserAPIKeyAuth,
 )
+from litellm.proxy.auth import core
 from litellm.proxy.auth.auth_checks import common_checks
 from litellm.proxy.auth.auth_utils import (
     _allow_model_level_clientside_configurable_parameters,
@@ -50,6 +51,7 @@ from litellm.proxy.common_utils.http_parsing_utils import populate_request_with_
 from litellm.proxy.common_utils.user_api_key_cache import UserApiKeyCache
 from litellm.proxy.utils import ProxyLogging
 from litellm.router import Router
+from litellm.rust_bridge._native import RustAuthSettings
 from litellm.types.utils import oauth_token_exchange_litellm_params, server_owned_wif_litellm_params
 from litellm.types.workload_identity import ANTHROPIC_WIF_KWARGS_KEYS, OPENAI_WIF_KWARGS_KEYS
 
@@ -6973,3 +6975,122 @@ def test_chatgpt_model_configuration_reaches_role_authorization(
                 model="",
                 route=inference_route,
             )
+
+
+_GATED_ROUTE: Final = "/v1/chat/completions"
+
+
+def _gate_settings(general_settings: Mapping[str, object]) -> RustAuthSettings:
+    return RustAuthSettings(dict(general_settings), None, core.HostFacts(master_key=None, premium=False, has_db=False))
+
+
+def _request_from(peer: str | None, forwarded_for: str | None = None) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": _GATED_ROUTE,
+            "headers": [] if forwarded_for is None else [(b"x-forwarded-for", forwarded_for.encode())],
+            "query_string": b"",
+            "client": None if peer is None else (peer, 51234),
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("general_settings", "peer", "forwarded_for", "refused_address"),
+    [
+        ({}, "10.0.0.9", None, None),
+        ({"allowed_ips": ["10.0.0.1", "10.0.0.2"]}, "10.0.0.2", None, None),
+        ({"allowed_ips": ["10.0.0.1"]}, "10.0.0.9", None, "10.0.0.9"),
+        ({"allowed_ips": []}, "10.0.0.1", None, "10.0.0.1"),
+        ({"allowed_ips": ["10.0.0.1"]}, None, None, ""),
+        ({"allowed_ips": ["10.0.0.1"]}, "10.0.0.1", "10.0.0.9", None),
+        ({"allowed_ips": ["10.0.0.1"], "use_x_forwarded_for": True}, "10.0.0.1", "10.0.0.9", "10.0.0.9"),
+        ({"allowed_ips": ["10.0.0.9"], "use_x_forwarded_for": True}, "10.0.0.1", "10.0.0.9", None),
+        ({"allowed_ips": ["10.0.0.1"], "use_x_forwarded_for": True}, "10.0.0.1", None, None),
+        ({"allowed_ips": ["10.0.0.9"], "use_x_forwarded_for": "true"}, "10.0.0.1", "10.0.0.9", "10.0.0.1"),
+    ],
+    ids=[
+        "no_allowlist",
+        "listed_peer",
+        "unlisted_peer",
+        "empty_allowlist",
+        "no_peer",
+        "forwarded_header_not_read",
+        "forwarded_header_replaces_peer",
+        "forwarded_header_listed",
+        "no_forwarded_header_falls_back_to_peer",
+        "forwarded_header_not_read_under_a_quoted_flag",
+    ],
+)
+async def test_the_ip_allowlist_refuses_a_client_it_does_not_list(
+    general_settings: Mapping[str, object], peer: str | None, forwarded_for: str | None, refused_address: str | None
+) -> None:
+    checked: Final = pre_db_read_auth_checks(
+        request=_request_from(peer, forwarded_for),
+        request_data={},
+        route=_GATED_ROUTE,
+        settings=_gate_settings(general_settings),
+    )
+
+    if refused_address is None:
+        await checked
+        return
+    with pytest.raises(HTTPException) as refusal:
+        await checked
+    assert (refusal.value.status_code, refusal.value.detail) == (
+        403,
+        f"Access forbidden: IP address {refused_address} not allowed.",
+    )
+
+
+@pytest.mark.parametrize(
+    ("general_settings", "admitted"),
+    [
+        ({}, True),
+        ({"allowed_routes": ["/health", _GATED_ROUTE]}, True),
+        ({"allowed_routes": ["/health"]}, False),
+        ({"allowed_routes": ["/v1/*"]}, False),
+        ({"allowed_routes": []}, False),
+        ({"allowed_routes": None}, False),
+    ],
+    ids=[
+        "no_allowlist",
+        "listed_route",
+        "unlisted_route",
+        "pattern_is_not_read",
+        "empty_allowlist",
+        "allowlist_written_with_no_value",
+    ],
+)
+async def test_the_proxy_route_allowlist_refuses_a_route_it_does_not_list(
+    general_settings: Mapping[str, object], admitted: bool
+) -> None:
+    checked: Final = pre_db_read_auth_checks(
+        request=_request_from("10.0.0.1"),
+        request_data={},
+        route=_GATED_ROUTE,
+        settings=_gate_settings(general_settings),
+    )
+
+    if admitted:
+        await checked
+        return
+    with pytest.raises(HTTPException) as refusal:
+        await checked
+    assert (refusal.value.status_code, refusal.value.detail) == (
+        403,
+        f"Access forbidden: Route {_GATED_ROUTE} not allowed",
+    )
+
+
+async def test_a_request_with_no_client_or_headers_passes_when_no_ip_allowlist_is_set() -> None:
+    refusal: Final = await pre_db_read_auth_checks(
+        request=Request({"type": "http"}),
+        request_data={},
+        route=_GATED_ROUTE,
+        settings=_gate_settings({"allowed_routes": [_GATED_ROUTE]}),
+    )
+
+    assert refusal is None

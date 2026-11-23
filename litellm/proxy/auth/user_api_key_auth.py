@@ -2062,12 +2062,14 @@ async def user_api_key_auth_builder(
     denied_key: UserAPIKeyAuth | None = None  # rebind-ok: the key a denied request had resolved, for the failure log
 
     try:
+        settings: Final = core.proxy_settings()
         with tracer.trace("litellm.proxy.auth.pre_db_read_auth_checks"):
             await pre_db_read_auth_checks(
                 request_data=request_data,
                 request=request,
                 route=route,
                 defer_team_checks=defer_team_checks,
+                settings=settings,
             )
         pass_through_endpoints: Final[list[dict] | None] = general_settings.get("pass_through_endpoints", None)
         ## CHECK IF X-LITELM-API-KEY IS PASSED IN - supercedes Authorization header
@@ -2096,7 +2098,6 @@ async def user_api_key_auth_builder(
             _ensure_parent_otel_span_on_request_state(request)
             parent_otel_span = getattr(request.state, "parent_otel_span", None)
 
-        settings: Final = core.proxy_settings()
         custom: Final = (
             await _custom_auth(request, api_key, request_data, route, parent_otel_span, user_custom_auth)
             if enterprise_custom_auth is not None or user_custom_auth is not None

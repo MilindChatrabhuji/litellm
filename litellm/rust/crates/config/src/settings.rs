@@ -5,9 +5,9 @@ use serde_with::{Map, serde_as};
 use veil::Redact;
 
 use crate::{
-    AdditionalFields, CacheSettings, JwtAuthSettings, LitellmRole, Object, PassThroughEndpoint,
-    PriorityReservation, PriorityReservationSettings, RedisSettings, RolePermissions, RouteList,
-    Spelled, Value, value::one_or_many,
+    AdditionalFields, AddressList, CacheSettings, JwtAuthSettings, LitellmRole, Object,
+    PassThroughEndpoint, PriorityReservation, PriorityReservationSettings, RedisSettings,
+    RolePermissions, RouteList, Spelled, Value, value::one_or_many,
 };
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -119,7 +119,9 @@ pub struct GeneralSettings {
     #[serde_as(as = "IsTrue")]
     pub allow_client_side_credentials: bool,
     pub public_routes: Option<RouteList>,
-    pub allowed_ips: Option<Box<[String]>>,
+    pub allowed_ips: Option<AddressList>,
+    #[serde_as(as = "IsTrue")]
+    pub use_x_forwarded_for: bool,
     #[serde(deserialize_with = "crate::routes::where_the_key_is_written")]
     pub allowed_routes: Option<RouteList>,
     pub custom_auth: Option<String>,
@@ -187,6 +189,7 @@ impl Default for GeneralSettings {
             allow_client_side_credentials: false,
             public_routes: None,
             allowed_ips: None,
+            use_x_forwarded_for: false,
             allowed_routes: None,
             custom_auth: None,
             litellm_key_header_name: None,

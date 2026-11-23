@@ -18,6 +18,7 @@ from litellm.proxy._types import (
     UserAPIKeyAuth,
 )
 from litellm.rust_bridge._native import (
+    RustAuth,
     auth_allowed_routes_grant,
     auth_first_denied_route,
     auth_jwt_team_routes_grant,
@@ -475,16 +476,9 @@ class RouteChecks:
 
     @staticmethod
     def is_allowed_on_proxy(route: str) -> bool:
-        from litellm.proxy.proxy_server import general_settings, premium_user
+        from litellm.proxy.auth import core  # noqa: PLC0415  # core imports this module
 
-        if "allowed_routes" not in general_settings:
-            return True
-        if premium_user is not True:
-            verbose_proxy_logger.error(
-                "Trying to set allowed_routes. This is an Enterprise feature. %s",
-                CommonProxyErrors.not_premium_user.value,
-            )
-        return route in general_settings["allowed_routes"]
+        return RustAuth.is_route_allowed_on_proxy(route, core.proxy_settings())
 
     @staticmethod
     def is_unbilled_route(route: str) -> bool:

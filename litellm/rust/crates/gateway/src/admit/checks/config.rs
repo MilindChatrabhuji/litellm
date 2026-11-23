@@ -134,7 +134,8 @@ fn variables(environment: &Environment) -> impl Iterator<Item = Box<str>> + use<
 
 /// The database settings are read as the proxy reads them, and what the proxy holds in its
 /// database beyond keys is not checked. `STORE_MODEL_IN_DB` is `Admit::stored_models`. The JWT settings shape only a caller whose token is a JWT, and the public routes
-/// only one who sends no key. `allowed_routes` is `head::allowed`.
+/// only one who sends no key. `allowed_routes` is `head::allowed`, and `use_x_forwarded_for` only picks the
+/// address `allowed_ips` reads, which still sends every request to Python.
 fn general(config: &Config) -> impl Iterator<Item = Box<str>> + '_ {
     let GeneralSettings {
         master_key: _,
@@ -163,6 +164,7 @@ fn general(config: &Config) -> impl Iterator<Item = Box<str>> + '_ {
         allow_user_auth: _,
         token_rate_limit_type: _,
         allowed_routes: _,
+        use_x_forwarded_for: _,
         completion_model,
         max_in_flight_requests_per_worker,
         max_queued_requests_per_worker,

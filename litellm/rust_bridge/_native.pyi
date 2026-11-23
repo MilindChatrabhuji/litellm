@@ -17,6 +17,7 @@ from typing import (
 
 import httpx
 from pydantic import JsonValue
+from starlette.requests import Request
 from typing_extensions import disjoint_base
 
 from litellm.integrations.custom_logger_v2.rust import RustHandle
@@ -1745,6 +1746,10 @@ class RustAuth:
     def plan(request: _AuthRequest, settings: RustAuthSettings) -> RustPlan | RustDenial: ...
     @staticmethod
     def is_public_route(route: str, settings: RustAuthSettings) -> bool: ...
+    @staticmethod
+    def check_request(route: str, request: Request, settings: RustAuthSettings) -> RustDenial | None: ...
+    @staticmethod
+    def is_route_allowed_on_proxy(route: str, settings: RustAuthSettings) -> bool: ...
     @staticmethod
     def authenticate_key(request: _AuthRequest, key: str | None, settings: RustAuthSettings) -> RustAuth: ...
     @staticmethod

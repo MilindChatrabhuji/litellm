@@ -13,3 +13,7 @@ pub(crate) fn where_the_key_is_written<'de, D: Deserializer<'de>>(
 ) -> Result<Option<RouteList>, D::Error> {
     RouteList::deserialize(deserializer).map(Some)
 }
+
+/// A list of client addresses, such as `allowed_ips`, read the way a [`RouteList`] is: a value
+/// that is not a list of strings is `Malformed`, and an allowlist then admits no address.
+pub type AddressList = Lenient<Box<[String]>>;

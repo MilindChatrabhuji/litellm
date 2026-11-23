@@ -3020,7 +3020,7 @@ def test_add_allowed_ip_hands_save_config_only_the_changed_general_setting(monke
     covered by test_ProxyConfig_save_config_merges_changed_keys_without_copying_file_settings.
 
     This lives here rather than in the e2e suite because /add/allowed_ip mutates the
-    live general_settings["allowed_ips"] that auth_utils._check_valid_ip reads, so on a
+    live general_settings["allowed_ips"] that auth_utils.pre_db_read_auth_checks reads, so on a
     shared proxy the first call locks every later request out, cleanup included.
     """
     from types import MappingProxyType

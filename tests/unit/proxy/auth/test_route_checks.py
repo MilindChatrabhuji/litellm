@@ -5313,3 +5313,20 @@ def test_member_can_reach_skill_history_visibility_checks(route: str) -> None:
         )
     except HTTPException as exc:
         pytest.fail(f"History visibility could not run: {exc.detail}")
+
+
+@pytest.mark.parametrize(
+    ("general_settings", "route", "allowed"),
+    [
+        ({}, "/v1/responses", True),
+        ({"allowed_routes": ["/v1/responses"]}, "/v1/responses", True),
+        ({"allowed_routes": ["/v1/responses"]}, "/v1/chat/completions", False),
+        ({"allowed_routes": []}, "/v1/responses", False),
+    ],
+    ids=["no_allowlist", "listed", "unlisted", "empty_allowlist"],
+)
+def test_the_proxy_route_allowlist_is_read_from_the_live_settings(
+    general_settings: Mapping[str, object], route: str, allowed: bool
+) -> None:
+    with patch("litellm.proxy.proxy_server.general_settings", dict(general_settings)):
+        assert RouteChecks.is_allowed_on_proxy(route) is allowed

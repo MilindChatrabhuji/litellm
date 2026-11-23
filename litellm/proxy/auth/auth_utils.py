@@ -50,6 +50,7 @@ from litellm.proxy.common_utils.http_parsing_utils import (
     safe_get_request_parsed_body,
 )
 from litellm.proxy.pricing_currency import PRICING_CURRENCY_FIELD
+from litellm.rust_bridge._native import RustAuth, RustAuthSettings
 from litellm.types.passthrough_endpoints.pass_through_endpoints import (
     LITELLM_PASS_THROUGH_ENDPOINT_MARKER,
 )
@@ -135,27 +136,6 @@ def get_request_ip_address(request: Request, use_x_forwarded_for: bool | None = 
 
 
 _get_request_ip_address: Final = get_request_ip_address
-
-
-def _check_valid_ip(
-    allowed_ips: list[str] | None,
-    request: Request,
-    use_x_forwarded_for: bool | None = False,
-) -> tuple[bool, str | None]:
-    """
-    Returns if ip is allowed or not
-    """
-    if allowed_ips is None:  # if not set, assume true
-        return True, None
-
-    # if general_settings.get("use_x_forwarded_for") is True then use x-forwarded-for
-    client_ip: Final = get_request_ip_address(request=request, use_x_forwarded_for=use_x_forwarded_for)
-
-    # Check if IP address is allowed
-    if client_ip not in allowed_ips:
-        return False, client_ip
-
-    return True, client_ip
 
 
 def check_complete_credentials(request_body: dict) -> bool:
@@ -1283,6 +1263,7 @@ async def pre_db_read_auth_checks(
     route: str,
     *,
     defer_team_checks: bool = False,
+    settings: RustAuthSettings | None = None,
 ):
     """
     1. Checks if request size is under max_request_size_mb (if set)
@@ -1316,26 +1297,12 @@ async def pre_db_read_auth_checks(
         defer_s3_buckets=checks_team_s3_buckets_in_handler(request),
     )
 
-    # Check 3. Check if IP address is allowed
-    is_valid_ip, passed_in_ip = _check_valid_ip(
-        allowed_ips=general_settings.get("allowed_ips", None),
-        use_x_forwarded_for=general_settings.get("use_x_forwarded_for", False),
-        request=request,
-    )
+    from litellm.proxy.auth import core  # noqa: PLC0415  # core imports this module
+    from litellm.proxy.auth.denial import denial_error  # noqa: PLC0415  # denial imports this module
 
-    if not is_valid_ip:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Access forbidden: IP address {passed_in_ip} not allowed.",
-        )
-
-    # Check 4. Check if request route is an allowed route on the proxy
-    if not RouteChecks.is_allowed_on_proxy(route):
-        verbose_proxy_logger.error("Route %s not in allowed_routes=%s", route, general_settings["allowed_routes"])
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Access forbidden: Route {route} not allowed",
-        )
+    denial: Final = RustAuth.check_request(route, request, settings if settings is not None else core.proxy_settings())
+    if denial is not None:
+        raise denial_error(denial)
 
 
 def route_in_additonal_public_routes(current_route: str):
