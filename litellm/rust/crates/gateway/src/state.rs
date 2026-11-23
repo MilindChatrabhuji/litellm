@@ -20,7 +20,7 @@ use litellm_repositories::{Database, KeyRepository, ObjectPermissionRepository};
 use tokio::runtime::Handle;
 
 use crate::{
-    Error, Gateway, Inference, KeyLimiter, RedisClients, Resources, db,
+    Error, Gateway, Inference, KeyLimiter, RedisClients, Resources, SpendLogs, db,
     host::{
         self, NativeRows,
         auth::{AuthStore, KEY_TTL},
@@ -40,6 +40,9 @@ pub struct AppState {
     /// The proxy's `parallel_request_limiter_v3`, which the inference routes' callback stage runs
     /// and the limit check before the body asks.
     pub key_limiter: Arc<KeyLimiter>,
+    /// The spend log writer the inference routes' callback stage queues to, `None` without a
+    /// database.
+    pub spend_logs: Option<Arc<SpendLogs>>,
     /// The config's `environment_variables` in front of the process environment.
     pub environment: Arc<dyn Lookup + Send + Sync>,
 }
@@ -57,12 +60,22 @@ impl AppState {
     ) -> Result<Self, Error> {
         let redis = crate::redis::connect(config, resources).await?;
         let routing = crate::redis::routing(&redis, environment);
+        let connected = db::connect(config, &resources.secrets).await?;
+        let repositories = connected.as_ref().map(|(_, repositories)| repositories);
         let Inference {
             gateway: inference,
             key_limiter,
-        } = crate::build_inference(config, environment, resources, routing, &redis).await?;
-        let (database, keys) = db::connect(config, &resources.secrets)
-            .await?
+            spend_logs,
+        } = crate::build_inference(
+            config,
+            environment,
+            resources,
+            routing,
+            &redis,
+            repositories,
+        )
+        .await?;
+        let (database, keys) = connected
             .map(|(pools, repositories)| (pools, Arc::new(keys(config, &redis, repositories))))
             .unzip();
         let entitlements = Arc::new(build_license(config, environment, resources).await);
@@ -73,6 +86,7 @@ impl AppState {
             keys,
             entitlements,
             key_limiter,
+            spend_logs,
             environment: resources.environment.clone(),
         })
     }
@@ -83,7 +97,11 @@ impl AppState {
         host::auth::auth(config, self.keys.clone())
     }
 
+    /// Drains the spend logs still queued, then closes the database pools.
     pub async fn close(&self) {
+        if let Some(spend_logs) = &self.spend_logs {
+            spend_logs.drain().await;
+        }
         if let Some(database) = &self.database {
             database.close().await;
         }
