@@ -44,7 +44,8 @@ from litellm.proxy.agent_endpoints.auth.agent_access_groups import (
     resolve_managed_agent_ceilings,
 )
 from litellm.proxy.agent_endpoints.auth.agent_caller import agent_caller_auth
-from litellm.proxy.agent_endpoints.auth.managed_authorization import managed_agent_policy
+from litellm.proxy.agent_endpoints.auth.managed_authorization import admit_managed_actor, managed_agent_policy
+from litellm.proxy.agent_endpoints.identity_store import AgentIdentityStore
 from litellm.proxy.auth.ip_address_utils import IPAddressUtils
 from litellm.proxy.auth.oauth2_check import OAuth2TokenValidationError
 from litellm.proxy.auth.user_api_key_auth import (  # noqa: F401  # legacy module exports
@@ -1561,26 +1562,42 @@ class MCPRequestHandler:
         if auth is None:
             return None
         refreshed: Final = auth.model_copy(update={"requires_fresh_policy": True})
-        if (auth.mcp_admitted_user_subject or auth.is_session_token) and auth.user_id:
+        was_managed: Final = managed_agent_policy(auth) is not None
+        user_id: Final = auth.user_id if auth.mcp_admitted_user_subject or auth.is_session_token else None
+        key_hash: Final = (
+            auth.api_key if auth.via_virtual_key and auth.api_key != LITELLM_PROXY_MASTER_KEY_ALIAS else None
+        )
+        if user_id:
             # A session credential (``lite login`` or a redeemed ID-JAG) has no key row, its authority is
             # sealed in the token: refresh the live user policy and keep the token's team, routes and models.
-            current = await MCPRequestHandler.reload_admitted_user(auth.user_id, requires_fresh_policy=True)
+            current = await MCPRequestHandler.reload_admitted_user(user_id, requires_fresh_policy=True)
             refreshed.object_permission = current.object_permission
             refreshed.object_permission_id = current.object_permission_id
             refreshed.user_role = current.user_role
             refreshed.org_id = current.org_id
-        elif auth.via_virtual_key and auth.api_key and auth.api_key != LITELLM_PROXY_MASTER_KEY_ALIAS:
-            current = await MCPRequestHandler._reload_admitted_key(auth.api_key, check_db_only=True)
-            refreshed.object_permission = current.object_permission
-            refreshed.object_permission_id = current.object_permission_id
+        elif key_hash:
+            current = await MCPRequestHandler._reload_admitted_key(key_hash, check_db_only=True)
+            if current.agent_id != auth.agent_id:
+                raise HTTPException(status_code=401, detail="Key agent binding changed. Authenticate again.")
+            refreshed.attach_catalog_key_permission(current)
             refreshed.team_id = current.team_id
             refreshed.org_id = current.org_id
             refreshed.project_id = current.project_id
             refreshed.user_id = current.user_id
             refreshed.access_group_ids = current.access_group_ids
-        else:
-            return refreshed
-        if refreshed.mcp_toolset_id is not None:
+        if auth.agent_id is not None or was_managed:
+            from litellm.proxy.db.db_lookup_gate import DBLookupDeadlineExceeded, bounded_db_lookup
+            from litellm.proxy.proxy_server import prisma_client
+
+            refreshed.managed_agent_policy = None
+            store: Final = AgentIdentityStore.from_client(prisma_client) if prisma_client is not None else None
+            try:
+                await bounded_db_lookup(admit_managed_actor(refreshed, store), name="managed_agent_policy")
+            except DBLookupDeadlineExceeded as exc:
+                raise HTTPException(status_code=503, detail="Agent policy could not be loaded") from exc
+            if was_managed and managed_agent_policy(refreshed) is None:
+                raise HTTPException(status_code=401, detail="Agent policy changed. Authenticate again.")
+        if (user_id or key_hash) and refreshed.mcp_toolset_id is not None:
             from litellm.proxy.mcp_server.server import apply_toolset_scope
 
             return await apply_toolset_scope(refreshed, refreshed.mcp_toolset_id)
@@ -2923,6 +2940,11 @@ class MCPRequestHandler:
         Note: object_permission is automatically populated when the team is fetched via
         get_team_object() in litellm/proxy/auth/auth_checks.py
         """
+        team: Final = await MCPRequestHandler.permission_team(user_api_key_auth)
+        return team.object_permission if team is not None else None
+
+    @staticmethod
+    async def permission_team(user_api_key_auth: UserAPIKeyAuth | None) -> LiteLLM_TeamTable | None:
         from litellm.proxy.auth.auth_checks import get_team_object
         from litellm.proxy.proxy_server import (
             prisma_client,
@@ -2940,7 +2962,7 @@ class MCPRequestHandler:
             return None
 
         # Get the team object (which has object_permission already loaded)
-        team_obj: Final[LiteLLM_TeamTable | None] = await get_team_object(
+        return await get_team_object(
             team_id=user_api_key_auth.team_id,
             prisma_client=prisma_client,
             user_api_key_cache=user_api_key_cache,
@@ -2948,11 +2970,6 @@ class MCPRequestHandler:
             proxy_logging_obj=proxy_logging_obj,
             check_db_only=bool(user_api_key_auth and user_api_key_auth.requires_fresh_policy),
         )
-
-        if not team_obj:
-            return None
-
-        return team_obj.object_permission
 
     @staticmethod
     async def _toolset_tool_permissions(

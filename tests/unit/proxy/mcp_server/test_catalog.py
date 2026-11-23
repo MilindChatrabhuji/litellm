@@ -63,9 +63,10 @@ async def test_catalog_refresh_keeps_selected_toolset_with_current_grants_and_co
 ) -> None:
     from fastapi import HTTPException
 
-    from litellm.caching.dual_cache import DualCache
     from litellm.proxy import proxy_server
     from litellm.proxy._types import LiteLLM_ObjectPermissionTable
+    from litellm.proxy.common_utils.state_cache import StateCache
+    from litellm.proxy.common_utils.user_api_key_cache import UserApiKeyCache
     from litellm.proxy.mcp_server import operations
     from litellm.proxy.mcp_server.server import apply_toolset_scope
     from litellm.proxy.mcp_server.tool_registry import global_mcp_tool_registry
@@ -97,11 +98,12 @@ async def test_catalog_refresh_keeps_selected_toolset_with_current_grants_and_co
         "object_permission_id": grants.object_permission_id,
     }
     stores.object_permission.seed(grants.object_permission_id, live_grants)
-    cache: Final = DualCache()
+    toolset_cache: Final = StateCache()
     monkeypatch.setattr(proxy_server, "prisma_client", database)
-    monkeypatch.setattr(proxy_server, "user_api_key_cache", cache)
+    monkeypatch.setattr(proxy_server, "user_api_key_cache", UserApiKeyCache())
+    monkeypatch.setattr(proxy_server, "mcp_state_cache", toolset_cache)
     monkeypatch.setattr(proxy_server, "general_settings", {"supported_db_objects": []})
-    await cache.async_set_cache(key="toolset_perms:narrow", value={"alpha": ["read_item", "write_item"]})
+    await toolset_cache.async_set_cache(key="toolset_perms:narrow", value={"alpha": ["read_item", "write_item"]})
     manager: Final = operations.global_mcp_server_manager
     for server_id in ("alpha", "beta"):
         monkeypatch.setitem(

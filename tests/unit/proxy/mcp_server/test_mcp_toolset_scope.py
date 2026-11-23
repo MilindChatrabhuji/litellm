@@ -150,6 +150,35 @@ class TestApplyToolsetScope:
         assert result.object_permission.mcp_tool_permissions == toolset_perms
 
     @pytest.mark.asyncio
+    async def test_jwt_agent_keeps_its_team_toolset_scope_during_catalog_refresh(self) -> None:
+        from litellm.proxy import proxy_server
+        from litellm.proxy.common_utils.state_cache import StateCache
+        from litellm.proxy.mcp_server.auth.user_api_key_auth_mcp import MCPRequestHandler
+        from litellm.proxy.mcp_server.server import apply_toolset_scope
+        from litellm.types.agents import AgentResponse
+        from litellm.types.mcp_server.mcp_toolset import MCPToolset
+
+        agent: Final = AgentResponse(agent_id="runner", agent_name="Runner", agent_card_params={})
+        caller: Final = UserAPIKeyAuth(agent_id="runner", team_id="team", jwt_claims={"agent": "runner"})
+        toolset: Final = MCPToolset(
+            toolset_id="math", toolset_name="math", tools=[{"server_id": "calculator", "tool_name": "add"}]
+        )
+        database: Final = MagicMock()
+        database.db.litellm_mcptoolsettable.find_many = AsyncMock(return_value=[toolset])
+        database.writer_db.litellm_agentstable.find_unique = AsyncMock(return_value=agent)
+        with (
+            patch.object(proxy_server, "mcp_state_cache", StateCache()),
+            patch.object(proxy_server, "prisma_client", database),
+        ):
+            scoped: Final = await apply_toolset_scope(caller, "math", granted=_granted_through_team("math"))
+            refreshed: Final = await MCPRequestHandler.refresh_catalog_authority(scoped)
+
+        assert refreshed is not None and refreshed.object_permission is not None
+        assert refreshed.requires_fresh_policy and refreshed.mcp_toolset_id == "math"
+        assert refreshed.object_permission.mcp_servers == ["calculator"]
+        assert refreshed.object_permission.mcp_tool_permissions == {"calculator": ["add"]}
+
+    @pytest.mark.asyncio
     async def test_a_non_admin_dashboard_session_is_pinned_as_its_admitted_user_instead_of_rewritten(self):
         """The dashboard session acts as its admitted user, whose team grants resolve per source, so a
         team-granted toolset is not capped by the user's own row: the row stays intact and the toolset

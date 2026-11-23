@@ -4421,7 +4421,9 @@ async def _with_object_permission(
         proxy_logging_obj=proxy_logging_obj,
         check_db_only=check_db_only,
     )
-    return key if permission is None else {**key, "object_permission": permission.model_dump(mode="json")}
+    if permission is None:
+        return key
+    return {**key, "object_permission": permission if check_db_only else permission.model_dump(mode="json")}
 
 
 async def _fetch_key(
@@ -4560,6 +4562,8 @@ async def get_object_permission(
     parent_otel_span: Span | None = None,
     proxy_logging_obj: ProxyLogging | None = None,
     check_db_only: bool = False,
+    *,
+    require_profile_grants: bool = False,
 ) -> LiteLLM_ObjectPermissionTable | None:
     """
     - Check if object permission id in proxy ObjectPermissionTable
@@ -4579,22 +4583,31 @@ async def get_object_permission(
             model_type=LiteLLM_ObjectPermissionTable,
         )
     )
-    if deserialized_perm is not None:
+    if deserialized_perm is not None and (
+        not require_profile_grants or "mcp_auth_profiles" in deserialized_perm.model_fields_set
+    ):
         return deserialized_perm
 
     # else, check db
+    use_writer: Final = check_db_only or require_profile_grants
     try:
+        lease: Final = await user_api_key_cache.lease(key) if use_writer else None
         _perm_obj: Final = await bounded_db_lookup(
             ObjectPermissionRepository(prisma_client).find_by_object_permission_id(
-                object_permission_id, use_writer=check_db_only
+                object_permission_id, use_writer=use_writer
             ),
             name="object_permission",
         )
 
         if _perm_obj is None:
-            if check_db_only:
+            if use_writer:
                 raise HTTPException(status_code=403, detail="Referenced object permission does not exist")
             return None
+        if lease is not None:
+            # Public dumps omit empty grants, but a checked cache entry must distinguish them from an old projection.
+            payload: Final = {**_perm_obj.model_dump(mode="json"), "mcp_auth_profiles": _perm_obj.mcp_auth_profiles}
+            _ = await user_api_key_cache.async_set_leased(lease, payload, get_management_object_ttl(user_api_key_cache))
+            return LiteLLM_ObjectPermissionTable.model_validate(payload)
         await user_api_key_cache.async_set_cache(
             key=key,
             value=_perm_obj,
@@ -4604,7 +4617,7 @@ async def get_object_permission(
 
         return _perm_obj
     except Exception:
-        if check_db_only:
+        if use_writer:
             raise
         return None
 

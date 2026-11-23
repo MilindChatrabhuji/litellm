@@ -10578,27 +10578,69 @@ async def test_get_org_object_by_alias_db_fetch_returns_validated_org(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_get_object_permission_db_fetch_returns_validated_permission(rust_auth_stores: RustAuthStores):
-    from litellm.proxy.auth.auth_checks import get_object_permission
+async def test_ordinary_permission_miss_fills_the_request_batch(rust_auth_stores: RustAuthStores) -> None:
+    from litellm.caching.redis_batch import request_redis_batch_scope
+    from tests.unit.redis.stores.auth_cache_double import shared_cache
 
-    perm_row = LiteLLM_ObjectPermissionTable(object_permission_id="op-1", vector_stores=["vs-1"])
+    permission: Final = LiteLLM_ObjectPermissionTable(object_permission_id="op-1", vector_stores=["vs-1"])
+    rust_auth_stores.object_permission.seed("op-1", permission)
+    cache, redis = shared_cache()
+    key: Final = AuthObject.object_permission("op-1")
 
-    mock_prisma_client = MagicMock()
-    rust_auth_stores.object_permission.seed("op-1", perm_row)
+    with request_redis_batch_scope() as request:
+        result: Final = await auth_checks.get_object_permission("op-1", MagicMock(), cache)
+        assert result == permission
+        assert cache.get_local(key) == permission.model_dump(mode="json")
+        assert redis.commands == [("GET", key.key)]
+        await request.flush_pre_call()
+    assert redis.redis[key.key] == permission.model_dump(mode="json")
+    assert rust_auth_stores.object_permission.lookups == [("op-1", False)]
 
-    mock_cache = MagicMock()
-    mock_cache.async_get_cache = AsyncMock(return_value=None)
-    mock_cache.async_set_cache = AsyncMock()
 
-    result = await get_object_permission(
-        object_permission_id="op-1",
-        prisma_client=mock_prisma_client,
-        user_api_key_cache=mock_cache,
-    )
+@pytest.mark.asyncio
+@pytest.mark.parametrize("grants", [None, {}, {"server": "Build"}])
+async def test_writer_returns_projected_grants_and_reuses_them_until_eviction(
+    rust_auth_stores: RustAuthStores, grants: Mapping[str, str] | None
+) -> None:
+    cache: Final = UserApiKeyCache()
+    prisma: Final = MagicMock()
+    key: Final = AuthObject.object_permission("linked")
+    rows: Final = rust_auth_stores.object_permission
+    rows.writer["linked"] = LiteLLM_ObjectPermissionTable(object_permission_id="linked", mcp_auth_profiles=grants)
+    await cache.async_set_cache(key, LiteLLM_ObjectPermissionTable(object_permission_id="linked"))
 
-    assert isinstance(result, LiteLLM_ObjectPermissionTable)
-    assert result.object_permission_id == "op-1"
-    assert result.vector_stores == ["vs-1"]
+    for fresh in (True, False):
+        row = await auth_checks.get_object_permission(
+            "linked", prisma, cache, check_db_only=fresh, require_profile_grants=True
+        )
+        assert row is not None and "mcp_auth_profiles" in row.model_fields_set
+        assert (row.mcp_auth_profiles or {}) == (grants or {})
+    assert rows.lookups == [("linked", True)]
+
+    await cache.async_delete_cache(key.key)
+    rows.writer["linked"] = LiteLLM_ObjectPermissionTable(object_permission_id="linked", mcp_auth_profiles={"s": "Ops"})
+    current: Final = await auth_checks.get_object_permission("linked", prisma, cache, require_profile_grants=True)
+    assert current is not None and current.mcp_auth_profiles == {"s": "Ops"}
+
+
+@pytest.mark.asyncio
+async def test_permission_read_finishing_after_eviction_leaves_the_cache_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    cache: Final = UserApiKeyCache()
+    key: Final = AuthObject.object_permission("fixture")
+
+    async def read_fixture(object_permission_id: str, *, use_writer: bool) -> str:
+        await cache.async_delete_cache(key.key)
+        return LiteLLM_ObjectPermissionTable(object_permission_id=object_permission_id).model_dump_json()
+
+    def repository(kind: object) -> SimpleNamespace | None:
+        if kind is RustObjectPermissionRepository:
+            return SimpleNamespace(find_by_object_permission_id=read_fixture)
+        return None
+
+    monkeypatch.setattr(rust_database, "repository", repository)
+    row: Final = await auth_checks.get_object_permission("fixture", MagicMock(), cache, require_profile_grants=True)
+    assert row is not None and row.object_permission_id == "fixture"
+    assert cache.get_local(key) is None
 
 
 @pytest.mark.asyncio
@@ -12506,14 +12548,12 @@ async def test_authoritative_team_permission_outage_cannot_drop_the_teams_restri
     _install_store(monkeypatch, RustTeamRepository, AsyncMock(), AsyncMock(return_value=row.model_dump_json()))
     client: Final = MagicMock()
     rust_auth_stores.object_permission.writer["team-permission"] = RuntimeError("unavailable")
-    cache: Final = MagicMock()
-    cache.async_get_cache = AsyncMock()
-    cache.async_set_cache = AsyncMock()
+    cache: Final = UserApiKeyCache()
     with pytest.raises(HTTPException) as failure:
         await get_team_object(row.team_id, client, cache, check_db_only=True)
     assert failure.value.status_code == 404
     assert rust_auth_stores.object_permission.lookups == [("team-permission", True)]
-    cache.async_set_cache.assert_not_awaited()
+    assert cache.get_local(AuthObject.team(row.team_id)) is None
 
 
 @pytest.mark.asyncio
@@ -12529,12 +12569,13 @@ async def test_referenced_permission_failures_preserve_legacy_behavior_and_deny_
     client = MagicMock()
     if not missing:
         rust_auth_stores.object_permission.seed("referenced", RuntimeError("unavailable"))
-    cache = MagicMock()
-    cache.async_get_cache = AsyncMock(return_value=None)
+    cache = UserApiKeyCache()
     if strict:
+        await cache.async_set_cache(
+            AuthObject.object_permission("referenced"), LiteLLM_ObjectPermissionTable(object_permission_id="referenced")
+        )
         with pytest.raises(HTTPException if missing else RuntimeError):
             await get_object_permission("referenced", client, cache, check_db_only=True)
-        cache.async_get_cache.assert_not_awaited()
     else:
         assert await get_object_permission("referenced", client, cache) is None
 
