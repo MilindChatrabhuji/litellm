@@ -178,6 +178,10 @@ def _wire_team_create_tx(prisma_client):
     async def _tx():
         yield SimpleNamespace(
             litellm_teamtable=prisma_client.db.litellm_teamtable,
+            litellm_objectpermissiontable=prisma_client.db.litellm_objectpermissiontable,
+            litellm_mcpservertable=prisma_client.db.litellm_mcpservertable,
+            litellm_budgettable=prisma_client.db.litellm_budgettable,
+            litellm_modeltable=prisma_client.db.litellm_modeltable,
             query_raw=AsyncMock(return_value=[]),
         )
 
@@ -3112,6 +3116,8 @@ async def test_create_team_member_budget_table():
 
         assert "team_member_budget_id" in result["metadata"]
         assert result["metadata"]["team_member_budget_id"] == "budget_123"
+        assert "metadata" not in new_team_data_json
+        assert new_team_data_json["team_member_budget"] == 100.0
 
         assert "team_member_budget" not in result
         assert "team_member_budget_duration" not in result
@@ -3220,6 +3226,8 @@ async def test_upsert_team_member_budget_table_existing_budget():
 
         assert "team_member_budget_id" in result["metadata"]
         assert result["metadata"]["team_member_budget_id"] == "existing_budget_123"
+        assert "metadata" not in updated_kv
+        assert updated_kv["team_member_budget"] == 200.0
 
         assert "team_member_budget" not in result
         assert "team_member_budget_duration" not in result
@@ -3243,7 +3251,7 @@ async def test_upsert_team_member_budget_table_no_existing_budget():
     )
 
     team_table = MagicMock(spec=LiteLLM_TeamTable)
-    team_table.metadata = {}
+    team_table.metadata = None
     team_table.team_alias = "Test Team"
     team_table.budget_duration = None
 
@@ -3273,6 +3281,7 @@ async def test_upsert_team_member_budget_table_no_existing_budget():
         assert mock_new_budget.called
         assert "team_member_budget_id" in result["metadata"]
         assert result["metadata"]["team_member_budget_id"] == "new_budget_456"
+        assert team_table.metadata is None
 
         assert "team_member_budget" not in result
         assert "team_member_budget_duration" not in result
@@ -20075,7 +20084,7 @@ async def test_default_budget_cache_eviction_does_not_fail_after_redis_error() -
     user_api_key_cache = MagicMock()
     user_api_key_cache.async_delete_cache = AsyncMock(side_effect=RuntimeError("redis unavailable"))
 
-    await TeamMemberBudgetHandler._evict_default_budget_cache(
+    await TeamMemberBudgetHandler.evict_default_budget_cache(
         budget_id="budget_456",
         user_api_key_cache=user_api_key_cache,
     )
