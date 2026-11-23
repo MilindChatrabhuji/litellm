@@ -20,7 +20,7 @@ use crate::{
     Ended, Error, Gateway, RequestId,
     error::ErrorFormat,
     headers::Routing,
-    hooks::{self, CallType},
+    hooks::{self, CallType, ServedBy},
     model_restamp::ReportedModel,
     record, request,
     routing::{self, Host, RouteAttempt},
@@ -73,6 +73,18 @@ pub(crate) trait Endpoint: RouteAttempt {
         None
     }
 
+    /// The provider's id for a complete outcome's answer.
+    fn response_id(outcome: &Self::Outcome) -> Option<String> {
+        let _ = outcome;
+        None
+    }
+
+    /// The provider's id for a stream's answer, when the event whose `data` this is names it.
+    fn stream_response_id(data: &str) -> Option<String> {
+        let _ = data;
+        None
+    }
+
     /// The outcome that served the call as the response the client reads.
     fn render(outcome: Self::Outcome, reported: ReportedModel<'_>) -> Result<Response, Error>;
 }
@@ -96,12 +108,18 @@ where
         let routed = routing::call(gateway, identity, E::OP, E::PATH, &model, &endpoint).await?;
         let routing = Routing::served(&routed);
         let reported = ReportedModel::of(&model, &routed);
-        let model_group = routed.model_group;
+        let served = ServedBy {
+            deployment: gateway.router.registry().deployment(&routed.deployment_id),
+            model_group: routed.model_group,
+        };
         let mut outcome = routed.output.response;
-        let told = hooks::answered::<E, _>(&hooks, &mut outcome, model_group).await?;
+        let told = hooks::answered::<E, _>(&hooks, &mut outcome, served).await?;
         Ok(told.answer((Extension(routing), E::render(outcome, reported)?)))
     };
-    record::write(|entries| entries.serve_as(E::CALL_TYPE));
+    record::write(|entries| {
+        entries.serve_as(E::CALL_TYPE);
+        entries.name_call(call.request_id.clone());
+    });
     let served = match body {
         Ok(body) => hooks::around(gateway, identity, body, serve).await,
         Err(error) => Err(Ended::from(error)),

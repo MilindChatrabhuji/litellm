@@ -20,7 +20,7 @@ use litellm_error::{Report, Source};
 use litellm_gateway_auth::Authenticated;
 use litellm_gateway_inference::{
     CallHooks, HookError, Refusal, ServedCall,
-    record::{self, Entries},
+    record::{self, Charged, Entries},
 };
 use serde_json::{Map, Value};
 use strum::VariantArray;
@@ -163,6 +163,7 @@ impl Callbacks {
 
     pub(crate) fn begin(self: &Arc<Self>, identity: &Authenticated<NativeRows>) -> Call {
         Call {
+            charged: fields::charged(identity),
             states: self
                 .callbacks
                 .iter()
@@ -180,6 +181,8 @@ impl Callbacks {
 /// its record, which one callback's patch changes for the callbacks after it.
 pub struct Call {
     callbacks: Arc<Callbacks>,
+    /// Who the call is charged to, written to its record with the body the pre-call hook holds.
+    charged: Charged,
     /// By each callback's place in `callbacks`.
     states: Vec<Option<RequestState>>,
 }
@@ -277,6 +280,7 @@ impl CallHooks for Call {
     async fn pre_call(&self, body: Map<String, Value>) -> Result<Map<String, Value>, HookError> {
         let mut unheld = Some(body);
         record::write(|entries| {
+            entries.charge_to(self.charged.clone());
             if let Some(body) = unheld.take() {
                 entries.hold(body);
             }
@@ -460,7 +464,10 @@ mod tests {
     fn served() -> ServedCall {
         ServedCall {
             model_group: "claude".to_owned(),
+            deployment: None,
+            response_id: None,
             usage: None,
+            first_event: None,
         }
     }
 

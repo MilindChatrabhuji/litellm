@@ -4255,6 +4255,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "http-body 1.1.0",
+ "jiff",
  "litellm-auth",
  "litellm-cache",
  "litellm-cache-memory",

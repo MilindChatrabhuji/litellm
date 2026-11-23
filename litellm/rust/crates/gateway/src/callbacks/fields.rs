@@ -2,14 +2,26 @@
 //! the proxy's `v2_proxy_fields.py`. A field the gateway cannot work out yet is left out of what
 //! a callback is handed, and one it has no place for is not written.
 
+use std::time::SystemTime;
+
+use jiff::Timestamp;
 use litellm_callbacks::{
-    CallFacts, CallKind, CallTarget, CallTiming, Field, FieldSet, FieldValues, Hook, HookInput,
-    LoggedModelGroup, Outcome, PatchOp, Scalar, Usage, UsageRecord,
+    AttemptTiming, CallFacts, CallIds, CallKind, CallTarget, CallTiming, Deployment, Field,
+    FieldSet, FieldValues, Hook, HookInput, KeyIdentity, LoggedKeyIdentity, LoggedModelGroup,
+    MetadataKind, ModelInfo, Moment, Outcome, PatchOp, Scalar, SpendLogId, Usage, UsageRecord,
 };
-use litellm_gateway_inference::record::{Ended, Entries};
+use litellm_gateway_auth::Authenticated;
+use litellm_gateway_auth_core::{Caller, StoredKey};
+use litellm_gateway_inference::{
+    CallType,
+    record::{Charged, Ended, Entries, unix},
+};
 use litellm_llms_types::formats::chat_completions::ChatCompletionsUsage;
 use serde::Serialize;
 use serde_json::{Map, Value};
+
+use super::parallel_request_limiter::{MASTER_KEY_ALIAS, PROXY_ADMIN_NAME};
+use crate::host::NativeRows;
 
 const MODEL: &str = "model";
 
@@ -26,6 +38,53 @@ pub enum Unwritable {
     Model(Value),
     #[error("{0:?} is part of the request body, which the route already has")]
     Routed(Field),
+}
+
+/// Who `identity` is charged as: a key by the hash its row is stored under, its alias and its
+/// owner, and the master key by Python's alias for it and the proxy admin. Native keys name no
+/// team, organization, project or end user.
+pub(super) fn charged(identity: &Authenticated<NativeRows>) -> Charged {
+    match &**identity {
+        Caller::MasterKey => Charged {
+            key_hash: Some(MASTER_KEY_ALIAS.to_owned()),
+            key_alias: None,
+            user_id: Some(PROXY_ADMIN_NAME.to_owned()),
+        },
+        Caller::Key(key) => Charged {
+            key_hash: identity.hash().map(ToString::to_string),
+            key_alias: key.key.alias().map(str::to_owned),
+            user_id: key.key.record().user_id.clone(),
+        },
+    }
+}
+
+/// The route a call came in on, as Python's `user_api_key_request_route` names it.
+fn route(call_type: CallType) -> &'static str {
+    match call_type {
+        CallType::AnthropicMessages => "/v1/messages",
+        CallType::Aocr => "/v1/ocr",
+    }
+}
+
+/// `at` as the UTC `datetime` Python logs it as.
+fn moment(at: SystemTime) -> Option<Moment> {
+    let utc = Timestamp::try_from(at)
+        .ok()?
+        .to_zoned(jiff::tz::TimeZone::UTC);
+    Some(Moment {
+        year: i32::from(utc.year()),
+        month: u8::try_from(utc.month()).ok()?,
+        day: u8::try_from(utc.day()).ok()?,
+        hour: u8::try_from(utc.hour()).ok()?,
+        minute: u8::try_from(utc.minute()).ok()?,
+        second: u8::try_from(utc.second()).ok()?,
+        microsecond: u32::try_from(utc.subsec_nanosecond() / 1_000).ok()?,
+        utc_offset_seconds: Some(0),
+    })
+}
+
+fn text(value: Option<&str>) -> Option<Scalar> {
+    value.map(|value| Scalar::Text(value.to_owned()))
 }
 
 fn record(value: impl Serialize) -> Option<Value> {
@@ -57,6 +116,110 @@ fn outcome(ended: Ended) -> Outcome {
     }
 }
 
+fn deployment(entries: &Entries) -> Option<&litellm_router_core::Deployment> {
+    entries.served()?.deployment.as_deref()
+}
+
+/// The provider the served deployment was called through, as Python's `custom_llm_provider`
+/// names it.
+fn provider(entries: &Entries) -> Option<String> {
+    let deployment = deployment(entries)?;
+    deployment
+        .resolved_provider
+        .clone()
+        .or_else(|| deployment.params.custom_llm_provider.clone())
+        .or_else(|| {
+            deployment
+                .params
+                .model
+                .split_once('/')
+                .map(|(provider, _)| provider.to_owned())
+        })
+}
+
+fn key_identity(charged: &Charged) -> KeyIdentity {
+    KeyIdentity {
+        key_hash: text(charged.key_hash.as_deref()),
+        api_key: text(charged.key_hash.as_deref()),
+        key_alias: text(charged.key_alias.as_deref()),
+        user_id: text(charged.user_id.as_deref()),
+        ..KeyIdentity::default()
+    }
+}
+
+fn logged_key_identity(entries: &Entries) -> LoggedKeyIdentity {
+    let charged = entries.charged();
+    LoggedKeyIdentity {
+        metadata_kind: Some(MetadataKind::Mapping),
+        key_hash: text(charged.key_hash.as_deref()),
+        key_alias: text(charged.key_alias.as_deref()),
+        user_id: text(charged.user_id.as_deref()),
+        request_route: text(entries.call_type().map(route)),
+        ..LoggedKeyIdentity::default()
+    }
+}
+
+fn served_deployment(entries: &Entries) -> Option<Deployment> {
+    let deployment = deployment(entries)?;
+    let rate = |name: &str| match deployment.raw_params.get(name)? {
+        Value::Number(number) => Some(number.as_i64().map_or_else(
+            || Scalar::Float(number.as_f64().unwrap_or(0.0)),
+            |whole| Scalar::Int(i128::from(whole)),
+        )),
+        Value::String(spelled) => Some(Scalar::Text(spelled.clone())),
+        _ => None,
+    };
+    Some(Deployment {
+        model_info: Some(ModelInfo {
+            id: text(Some(&deployment.id)),
+            tpm: rate("tpm"),
+            rpm: rate("rpm"),
+            ..ModelInfo::default()
+        }),
+        provider: text(provider(entries).as_deref()),
+        tpm: rate("tpm"),
+        rpm: rate("rpm"),
+        params_present: Some(true),
+        ..Deployment::default()
+    })
+}
+
+/// The id the call's spend log row is written under, as `get_spend_logs_id` picks it: the
+/// provider's id for the answer, else the call id.
+fn spend_log_id(entries: &Entries) -> SpendLogId {
+    let answered = entries
+        .served()
+        .and_then(|served| served.response_id.clone());
+    SpendLogId {
+        id: answered.or_else(|| entries.call_id().map(str::to_owned)),
+        ..SpendLogId::default()
+    }
+}
+
+/// When a stream's first event arrived, else when the call ended, as Python defaults
+/// `completion_start_time` to the end for a complete answer.
+fn completion_start(entries: &Entries) -> Option<SystemTime> {
+    entries
+        .served()
+        .and_then(|served| served.first_event)
+        .or(entries.end())
+}
+
+/// The call's times.
+fn timing(entries: &Entries) -> AttemptTiming {
+    let completion_start = completion_start(entries);
+    AttemptTiming {
+        start: moment(entries.start()),
+        end: entries.end().and_then(moment),
+        api_call_start: entries.api_call_start().and_then(moment),
+        completion_start: completion_start.and_then(moment),
+        completion_start_present: Some(completion_start.is_some()),
+        logged_start: moment(entries.start()),
+        logged_end: entries.end().and_then(moment),
+        ..AttemptTiming::default()
+    }
+}
+
 fn read(entries: &Entries, field: Field) -> Option<Value> {
     match field {
         Field::Model => entries.model().map(Value::from),
@@ -65,6 +228,11 @@ fn read(entries: &Entries, field: Field) -> Option<Value> {
         Field::ResponseHeaders => Some(Value::Object(entries.response_headers().clone())),
         Field::Outcome => record(outcome(entries.ended()?)),
         Field::Usage => record(usage(entries.served()?.usage.as_ref()?)),
+        Field::KeyIdentity => record(key_identity(entries.charged())),
+        Field::LoggedKeyIdentity => record(logged_key_identity(entries)),
+        Field::Deployment => record(served_deployment(entries)?),
+        Field::AttemptTiming => record(timing(entries)),
+        Field::SpendLogId => record(spend_log_id(entries)),
         Field::LoggedModelGroup => record(LoggedModelGroup {
             value: Some(Scalar::Text(entries.served()?.model_group.clone())),
             ..LoggedModelGroup::default()
@@ -74,7 +242,12 @@ fn read(entries: &Entries, field: Field) -> Option<Value> {
 }
 
 fn facts(entries: &Entries) -> CallFacts {
+    let deployment = deployment(entries);
     CallFacts {
+        ids: CallIds {
+            call_id: entries.call_id().unwrap_or_default().to_owned(),
+            ..CallIds::default()
+        },
         kind: CallKind {
             call_type: entries
                 .call_type()
@@ -87,11 +260,16 @@ fn facts(entries: &Entries) -> CallFacts {
         target: CallTarget {
             model: entries.model().unwrap_or_default().to_owned(),
             model_group: entries.served().map(|served| served.model_group.clone()),
+            provider: provider(entries),
+            api_base: deployment.and_then(|deployment| deployment.params.api_base.clone()),
+            deployment_id: deployment.map(|deployment| deployment.id.clone()),
             ..CallTarget::default()
         },
         timing: CallTiming {
-            start: entries.start(),
-            ..CallTiming::default()
+            start: unix(entries.start()),
+            provider_start: entries.api_call_start().map(unix),
+            first_token: completion_start(entries).map(unix),
+            end: entries.end().map(unix),
         },
         ..CallFacts::default()
     }
@@ -164,7 +342,7 @@ pub fn write(entries: &mut Entries, op: PatchOp) -> Result<(), Unwritable> {
 #[cfg(test)]
 mod tests {
     use litellm_gateway_inference::{
-        CallType,
+        ServedCall,
         record::{self, CallRecord},
     };
     use rstest::rstest;
@@ -265,6 +443,35 @@ mod tests {
             (on_the_same_hook, model, after),
             (seen.clone(), seen.0.clone(), seen)
         );
+    }
+
+    fn served(response_id: Option<&str>) -> ServedCall {
+        ServedCall {
+            model_group: "claude".to_owned(),
+            deployment: None,
+            response_id: response_id.map(str::to_owned),
+            usage: None,
+            first_event: None,
+        }
+    }
+
+    #[rstest]
+    #[case::the_answers_own_id(Some(served(Some("msg_1"))), Some("msg_1"))]
+    #[case::the_call_id_for_an_answer_that_names_none(Some(served(None)), Some("call-1"))]
+    #[case::the_call_id_for_a_failure(None, Some("call-1"))]
+    fn a_spend_log_row_is_written_under_the_answers_id_or_else_the_call_id(
+        #[case] served: Option<ServedCall>,
+        #[case] id: Option<&str>,
+    ) {
+        let logged = on_a_call(|entries| {
+            entries.name_call(Some("call-1".to_owned()));
+            match served {
+                Some(served) => entries.serve(served),
+                None => entries.fail(),
+            }
+            spend_log_id(entries).id
+        });
+        assert_eq!(logged.as_deref(), id);
     }
 
     #[rstest]
