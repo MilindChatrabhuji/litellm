@@ -7,11 +7,13 @@ pub mod auth;
 mod boot;
 mod capacity;
 mod router;
+mod spend_log;
 
 pub use auth::NativeRows;
 pub use boot::NativeBootHost;
 pub use capacity::NativeCapacityHost;
 pub use router::{NativeRouterHost, answers};
+pub use spend_log::NativeSpendLogHost;
 
 use std::sync::Arc;
 
