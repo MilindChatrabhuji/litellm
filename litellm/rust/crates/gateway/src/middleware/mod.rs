@@ -7,6 +7,7 @@ pub mod body_limit;
 mod call_id;
 pub mod cors;
 pub mod decompression;
+pub mod exposed_routes;
 mod in_flight;
 mod panic;
 mod rate_limit;
@@ -35,12 +36,14 @@ pub struct Settings {
     pub cors: cors::Settings,
     pub body_limit: body_limit::Settings,
     pub decompression: decompression::Settings,
+    pub exposed_routes: exposed_routes::Settings,
 }
 
 /// Outermost first, in the order of the proxy's FastAPI middleware, with the panic handler where
 /// Starlette answers an unhandled exception, outside every middleware. Python caps a body only through its size limit middleware,
 /// so axum's own 2 MB extractor default is lifted and a router that sets its own keeps it. Every
-/// middleware and route inside reads the license as `Extension<Arc<Entitlements>>`.
+/// middleware and route inside reads the license as `Extension<Arc<Entitlements>>`. The route
+/// allowlist is innermost, where Python's authentication runs it, after every FastAPI middleware.
 pub fn global(
     router: Router,
     settings: &Settings,
@@ -73,6 +76,10 @@ pub fn global(
                     size_limits,
                 )),
                 decompression::decompress,
+            ))
+            .layer(from_fn_with_state(
+                Arc::new(settings.exposed_routes.routes.clone()),
+                exposed_routes::refuse_unlisted,
             )),
     )
 }

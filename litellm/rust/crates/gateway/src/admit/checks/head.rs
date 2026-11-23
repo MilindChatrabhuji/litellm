@@ -22,13 +22,14 @@ pub(super) fn route(admit: &Admit, request: &Parts) -> Option<Reason> {
     messages_only(&admit.config).map(|over| Reason::new(Refused::Settings, over))
 }
 
-/// A route `general_settings.allowed_routes` leaves out, which Python refuses.
+/// A route `general_settings.allowed_routes` leaves out, which `middleware::exposed_routes`
+/// refuses in the native app.
 pub(super) fn allowed(admit: &Admit, request: &Parts) -> Option<Reason> {
     admit
         .exposed_routes
         .permits(request.uri.path())
         .err()
-        .map(|_| Reason::new(Refused::Route, "general_settings.allowed_routes"))
+        .map(|_| Reason::denied(Refused::Route, "general_settings.allowed_routes"))
 }
 
 pub(super) fn headers(admit: &Admit, request: &Parts) -> Option<Reason> {

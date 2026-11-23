@@ -16,6 +16,7 @@ requests:
     expect: python
     reason: route
     over: general_settings.allowed_routes
+    denied: true
 
   - name: listed route the native app does not serve
     path: /v1/chat/completions

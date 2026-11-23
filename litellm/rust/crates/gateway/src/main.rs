@@ -15,7 +15,7 @@ use axum::{
 };
 use litellm_config::{Config, Environment};
 use litellm_env::Lookup;
-use litellm_gateway::{Admit, AppState, Refused, Resources};
+use litellm_gateway::{Admit, AppState, Refusal, Refused, Resources};
 use litellm_tracing::{KeyLength, Level, Logger, Metadata, Record, Scrubbed, Sink};
 use serde_json::json;
 use tower::{Layer, Service};
@@ -115,7 +115,8 @@ async fn standalone(
 }
 
 /// `native` with nothing behind it. `admit` sees every request first, as it does in front of
-/// Python, and a request it refuses is answered 501 with why, since nothing else can serve it.
+/// Python. A request it refuses as unsupported is answered 501 with why, since nothing else can
+/// serve it, and one it refuses as denied is the native app's to refuse.
 fn alone<S>(
     native: S,
     admit: Arc<Admit>,
@@ -137,7 +138,10 @@ async fn admitted_or_not_served(
 ) -> Response {
     match admit.admit(request).await {
         Ok(request) => native.run(request).await,
-        Err((_, reason)) => not_served(reason.why),
+        Err((request, reason)) => match reason.refusal {
+            Refusal::Denied => native.run(*request).await,
+            Refusal::Unsupported => not_served(reason.why),
+        },
     }
 }
 
@@ -273,7 +277,7 @@ fn middleware_settings(
     config_environment: &dyn Lookup,
 ) -> litellm_gateway::middleware::Settings {
     use litellm_gateway::middleware::{
-        admission_control, body_limit, cors, decompression, security_headers,
+        admission_control, body_limit, cors, decompression, exposed_routes, security_headers,
     };
     litellm_gateway::middleware::Settings {
         admission_control: admission_control::Settings::from_general(&config.general_settings),
@@ -281,6 +285,7 @@ fn middleware_settings(
         cors: cors::Settings::from_environment(environment),
         body_limit: body_limit::Settings::from_general(&config.general_settings),
         decompression: decompression::Settings::from_environment(environment),
+        exposed_routes: exposed_routes::Settings::from_general(&config.general_settings),
     }
 }
 
@@ -444,6 +449,79 @@ mod tests {
             .and_then(|body| body["error"]["code"].as_str().map(str::to_owned));
         assert_eq!((status, code.as_deref()), expected);
         state.close().await;
+    }
+
+    #[rstest]
+    #[case::a_route_the_allowlist_leaves_out(
+        "  allowed_routes: [/health]\n",
+        "Bearer gateway-key",
+        StatusCode::FORBIDDEN
+    )]
+    #[case::a_key_the_native_app_refuses("", "Bearer not-the-key", StatusCode::UNAUTHORIZED)]
+    #[tokio::test]
+    async fn standalone_leaves_a_denied_request_to_the_native_app_to_refuse(
+        #[case] general: &str,
+        #[case] authorization: &str,
+        #[case] expected: StatusCode,
+    ) {
+        litellm_gateway::install_crypto_provider();
+        let config = Config::from_yaml(&format!(
+            "model_list:\n  - model_name: claude\n    litellm_params:\n      model: anthropic/claude-haiku-5-5\n      api_key: provider-key\ngeneral_settings:\n  master_key: gateway-key\n{general}"
+        ))
+        .unwrap();
+        let environment = Environment::default();
+        let (config, state, admit) = native_state(Some(config), &environment).await.unwrap();
+        let app = alone(native(state.clone(), &config, &environment), admit.unwrap());
+        let request = Request::post("/v1/messages")
+            .header("authorization", authorization)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                r#"{"model":"claude","max_tokens":8,"messages":[]}"#,
+            ))
+            .unwrap();
+
+        let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
+
+        assert_eq!(response.status(), expected);
+        state.close().await;
+    }
+
+    /// `admit` refuses the key and the native app is built to take it, as a key store that
+    /// changed between the two would leave them.
+    #[rstest]
+    #[tokio::test]
+    async fn standalone_keeps_a_key_refusal_the_native_app_would_no_longer_make() {
+        litellm_gateway::install_crypto_provider();
+        let holding = |master_key: &str| {
+            Config::from_yaml(&format!(
+                "model_list:\n  - model_name: claude\n    litellm_params:\n      model: anthropic/claude-haiku-5-5\n      api_key: provider-key\n      api_base: http://127.0.0.1:9\ngeneral_settings:\n  master_key: {master_key}\n"
+            ))
+            .unwrap()
+        };
+        let environment = Environment::default();
+        let (_, refusing, admit) = native_state(Some(holding("gateway-key")), &environment)
+            .await
+            .unwrap();
+        let (config, taking, _) = native_state(Some(holding("rotated-key")), &environment)
+            .await
+            .unwrap();
+        let app = alone(
+            native(taking.clone(), &config, &environment),
+            admit.unwrap(),
+        );
+        let request = Request::post("/v1/messages")
+            .header("authorization", "Bearer rotated-key")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                r#"{"model":"claude","max_tokens":8,"messages":[]}"#,
+            ))
+            .unwrap();
+
+        let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        refusing.close().await;
+        taking.close().await;
     }
 
     #[rstest]
