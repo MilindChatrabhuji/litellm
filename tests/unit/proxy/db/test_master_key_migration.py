@@ -6,7 +6,7 @@ from functools import reduce
 from typing import Final
 
 import pytest
-from pydantic import JsonValue
+from pydantic import JsonValue, TypeAdapter
 
 from litellm.constants import DEFAULT_MAX_RECURSE_DEPTH
 from litellm.proxy import proxy_server
@@ -120,13 +120,24 @@ def _seeded_tables() -> Tables:
             {
                 "server_id": "mcp-1",
                 "credentials": {"auth_value": _encrypted("mcp-token"), "aws_region_name": "us-east-1"},
+                "additional_auth": [
+                    {
+                        "id": "Build",
+                        "auth_type": "oauth2",
+                        "oauth2_flow": "client_credentials",
+                        "token_url": "https://issuer.invalid/token",
+                        "client_id": _encrypted("build-client"),
+                        "client_secret": _encrypted("build-secret"),
+                    }
+                ],
                 "static_headers": _encrypted('{"X-Api-Key": "header-secret"}'),
                 "env_vars": [
                     {"name": "GLOBAL", "scope": "global", "value": _encrypted("global-env")},
                     {"name": "PER_USER", "scope": "user", "value": ""},
                 ],
                 "env": {},
-            }
+            },
+            {"server_id": "malformed", "additional_auth": "{invalid"},
         ],
         "LiteLLM_MCPUserCredentials": [{"id": "cred-row-1", "credential_b64": _encrypted("byok-secret")}],
         "LiteLLM_TeamTable": [
@@ -149,7 +160,7 @@ def _seeded_tables() -> Tables:
     }
 
 
-_VALUES_UNDER_THE_PREVIOUS_KEY = 8
+_VALUES_UNDER_THE_PREVIOUS_KEY = 10
 
 
 @pytest.mark.asyncio
@@ -169,6 +180,20 @@ async def test_reencryption_moves_every_stored_shape_to_the_new_key_and_nothing_
     assert decrypt_if_encrypted_with(model_params["api_key"], PREVIOUS_KEY) is None
     assert (model_params["rpm"], model_params["use_in_pass_through"], model_params["api_base"]) == (10, False, None)
     mcp_server = tables["LiteLLM_MCPServerTable"][0]
+    (profile,) = TypeAdapter(tuple[dict[str, str], ...]).validate_python(mcp_server["additional_auth"])
+    assert tables["LiteLLM_MCPServerTable"][1]["additional_auth"] == "{invalid"
+    assert {
+        **profile,
+        "client_id": decrypt_if_encrypted_with(profile["client_id"], NEW_KEY),
+        "client_secret": decrypt_if_encrypted_with(profile["client_secret"], NEW_KEY),
+    } == {
+        "id": "Build",
+        "auth_type": "oauth2",
+        "oauth2_flow": "client_credentials",
+        "token_url": "https://issuer.invalid/token",
+        "client_id": "build-client",
+        "client_secret": "build-secret",
+    }
     assert decrypt_if_encrypted_with(mcp_server["static_headers"], NEW_KEY) == '{"X-Api-Key": "header-secret"}'
     assert mcp_server["credentials"]["aws_region_name"] == "us-east-1"
     assert decrypt_if_encrypted_with(mcp_server["env_vars"][0]["value"], NEW_KEY) == "global-env"
@@ -227,6 +252,7 @@ async def test_only_rows_holding_values_under_the_previous_key_are_written():
 
     assert sorted(database.writes) == [
         ("LiteLLM_Config", "param_value", "environment_variables"),
+        ("LiteLLM_MCPServerTable", "additional_auth", "mcp-1"),
         ("LiteLLM_MCPServerTable", "credentials", "mcp-1"),
         ("LiteLLM_MCPServerTable", "env_vars", "mcp-1"),
         ("LiteLLM_MCPServerTable", "static_headers", "mcp-1"),
@@ -275,6 +301,9 @@ class _SomeoneEditsEachRowAfterItIsRead(_FakeDatabase):
         if 'FROM "LiteLLM_MCPUserCredentials"' in query:
             for row in self.tables.get("LiteLLM_MCPUserCredentials", []):
                 row["credential_b64"] = "edited-by-an-admin"
+        if 'SELECT "server_id", "additional_auth" FROM "LiteLLM_MCPServerTable"' in query:
+            for row in self.tables.get("LiteLLM_MCPServerTable", []):
+                row["additional_auth"] = []
         return rows
 
 
@@ -302,6 +331,22 @@ async def test_rotation_reports_a_concurrent_edit_without_overwriting_it() -> No
 
     assert result is None
     assert tables["LiteLLM_MCPUserCredentials"][0]["credential_b64"] == "edited-by-an-admin"
+
+
+@pytest.mark.asyncio
+async def test_rotation_refuses_to_restore_a_profile_removed_after_its_secrets_were_read() -> None:
+    tables: Final[Tables] = {
+        "LiteLLM_MCPServerTable": [
+            {"server_id": "server", "additional_auth": [{"id": "Build", "authentication_token": _encrypted("token")}]}
+        ]
+    }
+
+    result: Final = await reencrypt_stored_values(
+        _SomeoneEditsEachRowAfterItIsRead(tables), from_key=PREVIOUS_KEY, to_key=NEW_KEY, require_unchanged=True
+    )
+
+    assert result is None
+    assert tables["LiteLLM_MCPServerTable"][0]["additional_auth"] == []
 
 
 @pytest.mark.asyncio

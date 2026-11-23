@@ -39,6 +39,7 @@ _SECRET_COLUMNS: Final = (
     _SecretColumn("LiteLLM_CacheConfig", "id", "cache_settings"),
     _SecretColumn("LiteLLM_ConfigOverrides", "config_type", "config_value"),
     _SecretColumn("LiteLLM_MCPServerTable", "server_id", "credentials"),
+    _SecretColumn("LiteLLM_MCPServerTable", "server_id", "additional_auth"),
     _SecretColumn("LiteLLM_MCPServerTable", "server_id", "static_headers", legacy_mcp_format="secret_map"),
     _SecretColumn("LiteLLM_MCPServerTable", "server_id", "env_vars"),
     _SecretColumn("LiteLLM_MCPServerTable", "server_id", "env", legacy_mcp_format="secret_map"),
