@@ -2,6 +2,7 @@
 Tests for backend domain models.
 """
 
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Final
 
@@ -24,7 +25,7 @@ from litellm.models.managed_files import (
 )
 from litellm.models.mcp_server import LiteLLM_MCPServerTable
 from litellm.models.model import LiteLLM_ProxyModelTable
-from litellm.models.object_permission import LiteLLM_ObjectPermissionTable
+from litellm.models.object_permission import LiteLLM_ObjectPermissionTable, StoredProfileGrantError
 from litellm.models.organization import LiteLLM_OrganizationTable
 from litellm.models.project import LiteLLM_ProjectTable
 from litellm.models.skills import LiteLLM_SkillsTable
@@ -187,6 +188,35 @@ class TestModel:
 
 
 class TestObjectPermission:
+    @pytest.mark.parametrize("stored", [{"server": 9}, ["server"], "invalid", False])
+    def test_bad_profile_metadata_preserves_the_permission_through_cache_serialization(self, stored: object) -> None:
+        permission: Final = LiteLLM_ObjectPermissionTable.model_validate(
+            {"object_permission_id": "perm", "vector_stores": ["store"], "mcp_auth_profiles": stored}
+        )
+        cached: Final = LiteLLM_ObjectPermissionTable.model_validate_json(permission.model_dump_json())
+
+        assert cached.vector_stores == ["store"]
+        assert cached.mcp_auth_profiles is StoredProfileGrantError.UNREADABLE
+
+    @pytest.mark.parametrize("grants", [None, {}], ids=["null", "empty"])
+    def test_empty_profile_grants_leave_existing_permission_fields_intact(
+        self, grants: Mapping[str, str] | None
+    ) -> None:
+        permission: Final = LiteLLM_ObjectPermissionTable(
+            object_permission_id="perm",
+            skills=["build"],
+            apps=["work"],
+            mcp_tool_search_enabled=False,
+            mcp_auth_profiles=grants,
+        )
+
+        assert permission.model_dump(exclude_unset=True) == {
+            "object_permission_id": "perm",
+            "skills": ["build"],
+            "apps": ["work"],
+            "mcp_tool_search_enabled": False,
+        }
+
     def test_object_permission_creation(self):
         perm = LiteLLM_ObjectPermissionTable(
             object_permission_id="test-perm-id",

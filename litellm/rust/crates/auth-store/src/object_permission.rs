@@ -1,12 +1,12 @@
 //! An object permission as the auth cache holds it, nested in the key that points at it.
 
-use litellm_redis_store::auth_cache::CachedObjectPermission;
+use litellm_redis_store::auth_cache::{CachedObjectPermission, ProfileGrants};
 use litellm_repositories::ObjectPermission;
 
 use crate::{Error, key::nullable};
 
 /// What `LiteLLM_ObjectPermissionTable.model_dump(mode="json")` holds for `row`, or the column the
-/// model would refuse the row for. The table has no `apps` column, so the model's default stands.
+/// model would refuse the row for. The repository's projection leaves `apps` at the model's default.
 pub(crate) fn cached_object_permission(
     row: ObjectPermission,
 ) -> Result<CachedObjectPermission, Error> {
@@ -24,6 +24,7 @@ pub(crate) fn cached_object_permission(
         search_tools,
         mcp_tool_search_enabled,
         skills,
+        mcp_auth_profiles,
     } = row;
     Ok(CachedObjectPermission {
         object_permission_id,
@@ -40,6 +41,9 @@ pub(crate) fn cached_object_permission(
         mcp_tool_search_enabled,
         skills: Some(skills),
         apps: None,
+        mcp_auth_profiles: nullable("mcp_auth_profiles", mcp_auth_profiles.as_ref())
+            .unwrap_or(Some(ProfileGrants::Unreadable))
+            .unwrap_or_default(),
         unread: Vec::new(),
     })
 }

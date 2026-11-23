@@ -9,7 +9,8 @@ use parking_lot::Mutex;
 
 pub use self::keys::AuthObject;
 pub use self::types::{
-    Bag, CachedKey, CachedMember, CachedObjectPermission, Lists, MemberRole, Settings,
+    Bag, CachedKey, CachedMember, CachedObjectPermission, Lists, MemberRole, ProfileGrants,
+    Settings,
 };
 use crate::{
     Error, Number, Pending, RequestRedis, Send, codec,

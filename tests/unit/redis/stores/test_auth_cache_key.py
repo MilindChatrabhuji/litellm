@@ -114,7 +114,8 @@ TEAM_ENTRY: Final = (
     r' "mcp_access_groups": [], "mcp_tool_permissions": {"server-a": ["search"]},'
     r' "vector_stores": ["store-a"], "agents": [], "agent_access_groups": [], "models": [],'
     r' "mcp_toolsets": [], "blocked_tools": [], "search_tools": [], "mcp_tool_search_enabled": null,'
-    r' "skills": [], "apps": null}, "access_group_ids": [], "rotation_count": 0, "auto_rotate": false,'
+    r' "skills": [], "apps": null, "mcp_auth_profiles": {"server-a": "Build"}},'
+    r' "access_group_ids": [], "rotation_count": 0, "auto_rotate": false,'
     r' "rotation_interval": null, "last_rotation_at": null, "key_rotation_at": null,'
     r' "router_settings": null, "budget_limits": null, "team_spend": 2.25, "team_alias": "Team KV",'
     r' "team_tpm_limit": null, "team_rpm_limit": null, "team_tpd_limit": null, "team_max_budget": 12.0,'
@@ -139,13 +140,21 @@ PERMISSION_ROW: Final = (
     r'{"object_permission_id":"kv-permission","mcp_servers":["server-a"],"mcp_access_groups":[],'
     r'"mcp_tool_permissions":{"server-a": ["search"]},"vector_stores":["store-a"],"agents":[],'
     r'"agent_access_groups":[],"models":[],"blocked_tools":[],"mcp_toolsets":[],"search_tools":[],'
-    r'"mcp_tool_search_enabled":null,"skills":[]}'
+    r'"mcp_tool_search_enabled":null,"skills":[],"mcp_auth_profiles":{"server-a": "Build"}}'
 )
 PERMISSION_ENTRY: Final = (
     r'{"object_permission_id": "kv-permission", "mcp_servers": ["server-a"], "mcp_access_groups": [],'
     r' "mcp_tool_permissions": {"server-a": ["search"]}, "vector_stores": ["store-a"], "agents": [],'
     r' "agent_access_groups": [], "models": [], "mcp_toolsets": [], "blocked_tools": [],'
-    r' "search_tools": [], "mcp_tool_search_enabled": null, "skills": [], "apps": null}'
+    r' "search_tools": [], "mcp_tool_search_enabled": null, "skills": [], "apps": null,'
+    r' "mcp_auth_profiles": {"server-a": "Build"}}'
+)
+UNREADABLE_PERMISSION_ENTRY: Final = (
+    r'{"object_permission_id": "kv-permission", "mcp_servers": ["server-a"], "mcp_access_groups": [],'
+    r' "mcp_tool_permissions": {"server-a": ["search"]}, "vector_stores": ["store-a"], "agents": [],'
+    r' "agent_access_groups": [], "models": [], "mcp_toolsets": [], "blocked_tools": [],'
+    r' "search_tools": [], "mcp_tool_search_enabled": null, "skills": [], "apps": null,'
+    r' "mcp_auth_profiles": "unreadable"}'
 )
 FULL_ROW: Final = (
     r'{"token":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","key_name":"sk-...full",'
@@ -306,8 +315,17 @@ async def test_python_caches_the_key_it_read_from_the_entry_in_the_same_bytes(
 
 @pytest.mark.parametrize(
     ("row", "entry"),
-    [(PERMISSION_ROW, PERMISSION_ENTRY), (FULL_PERMISSION_ROW, FULL_PERMISSION_ENTRY)],
-    ids=["its_defaults", "every_column_set"],
+    [
+        (PERMISSION_ROW, PERMISSION_ENTRY),
+        (FULL_PERMISSION_ROW, FULL_PERMISSION_ENTRY),
+        (
+            r'{"object_permission_id":"kv-permission","mcp_servers":["server-a"],'
+            r'"mcp_tool_permissions":{"server-a":["search"]},"vector_stores":["store-a"],'
+            r'"mcp_toolsets":[],"skills":[],"mcp_auth_profiles":{"server-a":9}}',
+            UNREADABLE_PERMISSION_ENTRY,
+        ),
+    ],
+    ids=["its_defaults", "every_column_set", "numeric_profile_id"],
 )
 def test_the_object_permission_entry_is_what_python_caches_for_the_repository_row(row: str, entry: str) -> None:
     permission: Final = LiteLLM_ObjectPermissionTable.model_validate_json(row)

@@ -59,6 +59,58 @@ impl Bag {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Lists(pub Vec<(String, Vec<String>)>);
 
+#[derive(Clone, Default, PartialEq, Eq, veil::Redact)]
+pub enum ProfileGrants {
+    #[default]
+    Absent,
+    Named(#[redact(with = "[REDACTED]")] Vec<(String, String)>),
+    Unreadable,
+}
+
+impl From<&Value> for ProfileGrants {
+    fn from(value: &Value) -> Self {
+        match value {
+            Value::None => Self::Absent,
+            Value::Dict(entries) if entries.is_empty() => Self::Absent,
+            Value::Dict(entries) => entries
+                .iter()
+                .map(|(server, profile)| Some((String::read(server)?, String::read(profile)?)))
+                .collect::<Option<_>>()
+                .map_or(Self::Unreadable, Self::Named),
+            _ => Self::Unreadable,
+        }
+    }
+}
+
+impl Field for ProfileGrants {
+    fn read(value: &Value) -> Option<Self> {
+        Some(value.into())
+    }
+
+    fn write(self) -> Value {
+        match self {
+            Self::Absent => Value::None,
+            Self::Named(entries) => Value::Dict(
+                entries
+                    .into_iter()
+                    .map(|(k, v)| (k.write(), v.write()))
+                    .collect(),
+            ),
+            Self::Unreadable => Value::Str("unreadable".into()),
+        }
+    }
+
+    fn entry(self, name: &'static str) -> Option<(String, Value)> {
+        (!matches!(self, Self::Absent)).then(|| (name.to_owned(), self.write()))
+    }
+}
+
+impl FromValue for ProfileGrants {
+    fn from_value(value: &Value) -> Result<Self, DecodeError> {
+        Ok(value.into())
+    }
+}
+
 /// The two roles `Member` takes.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, strum::EnumString, strum::IntoStaticStr, strum::VariantArray,
@@ -75,6 +127,10 @@ pub enum MemberRole {
 trait Field: Sized {
     fn read(value: &Value) -> Option<Self>;
     fn write(self) -> Value;
+
+    fn entry(self, name: &'static str) -> Option<(String, Value)> {
+        Some((name.to_owned(), self.write()))
+    }
 }
 
 impl Field for Value {
@@ -322,8 +378,9 @@ macro_rules! record {
         impl IntoValue for $name {
             fn into_value(self) -> Value {
                 Value::Dict(
-                    [$((stringify!($field).to_owned(), Field::write(self.$field)),)+]
+                    [$(Field::entry(self.$field, stringify!($field)),)+]
                         .into_iter()
+                        .flatten()
                         .chain(self.unread)
                         .map(|(name, value)| (Value::Str(name), value))
                         .collect(),
@@ -377,6 +434,7 @@ record! {
         mcp_tool_search_enabled: Option<bool>,
         skills: Option<Vec<String>>,
         apps: Option<Vec<String>>,
+        mcp_auth_profiles: ProfileGrants,
     }
 }
 
@@ -639,6 +697,24 @@ mod tests {
     }
 
     #[rstest]
+    #[case::bad_value(r#"{"server": 1}"#)]
+    #[case::list(r#"["server"]"#)]
+    #[case::cached_refusal(r#""unreadable""#)]
+    fn unreadable_grants_round_trip_with_unrelated_permissions(#[case] stored: &str) {
+        let input = format!(
+            r#"{{"object_permission": {{"object_permission_id":"p","vector_stores":["v"],"mcp_auth_profiles":{stored}}}}}"#
+        );
+        let original = key(&input).unwrap();
+        let cached = CachedKey::from_value(&original.into_value()).unwrap();
+        let permission = cached.object_permission.unwrap();
+        assert_eq!(permission.vector_stores, Some(vec!["v".into()]));
+        assert_eq!(
+            permission.mcp_auth_profiles,
+            super::ProfileGrants::Unreadable
+        );
+    }
+
+    #[rstest]
     fn a_float_field_takes_the_integer_python_also_takes() {
         assert_eq!(
             key(r#"{"spend": 3, "max_budget": 10}"#)
@@ -654,6 +730,7 @@ mod tests {
             r#"{"token": "hashed", "metadata": {"api_key": "credential-value"}, "#,
             r#""team_member": {"user_id": "u", "role": "user", "note": "credential-value"}, "#,
             r#""router_settings": {"redis_password": "credential-value"}, "budget_limits": [{"k": "credential-value"}], "#,
+            r#""object_permission": {"object_permission_id": "p", "mcp_auth_profiles": {"s": "credential-value"}}, "#,
             r#""later_field": "credential-value"}"#,
         ))
         .unwrap();

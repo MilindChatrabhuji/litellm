@@ -8,7 +8,7 @@ use litellm_auth_store::KeyDatabase;
 use litellm_db::{Endpoint, Observer, PoolLimits, Pools, QueryEvent, SslMode};
 use litellm_db_testing::MigratedPostgres;
 use litellm_gateway_auth_core::KeyHash;
-use litellm_redis_store::IntoValue;
+use litellm_redis_store::{IntoValue, auth_cache::ProfileGrants};
 use litellm_repositories::{Database, KeyRepository, ObjectPermissionRepository, Side};
 use litellm_secret_value::SecretValue;
 use rstest::rstest;
@@ -119,7 +119,7 @@ const TEAM_ENTRY: &str = concat!(
     r#" "mcp_access_groups": [], "mcp_tool_permissions": {"server-a": ["search"]},"#,
     r#" "vector_stores": ["store-a"], "agents": [], "agent_access_groups": [], "models": [],"#,
     r#" "mcp_toolsets": [], "blocked_tools": [], "search_tools": [], "mcp_tool_search_enabled": null,"#,
-    r#" "skills": [], "apps": null}, "access_group_ids": [], "rotation_count": 0, "auto_rotate": false,"#,
+    r#" "skills": [], "apps": null, "mcp_auth_profiles": {"server-a": "Build"}}, "access_group_ids": [], "rotation_count": 0, "auto_rotate": false,"#,
     r#" "rotation_interval": null, "last_rotation_at": null, "key_rotation_at": null,"#,
     r#" "router_settings": null, "budget_limits": null, "team_spend": 2.25, "team_alias": "Team KV","#,
     r#" "team_tpm_limit": null, "team_rpm_limit": null, "team_tpd_limit": null,"#,
@@ -145,13 +145,13 @@ const PERMISSION_ROW: &str = concat!(
     r#"{"object_permission_id":"kv-permission","mcp_servers":["server-a"],"mcp_access_groups":[],"#,
     r#""mcp_tool_permissions":{"server-a": ["search"]},"vector_stores":["store-a"],"agents":[],"#,
     r#""agent_access_groups":[],"models":[],"blocked_tools":[],"mcp_toolsets":[],"search_tools":[],"#,
-    r#""mcp_tool_search_enabled":null,"skills":[]}"#,
+    r#""mcp_tool_search_enabled":null,"skills":[],"mcp_auth_profiles":{"server-a": "Build"}}"#,
 );
 const PERMISSION_ENTRY: &str = concat!(
     r#"{"object_permission_id": "kv-permission", "mcp_servers": ["server-a"], "mcp_access_groups": [],"#,
     r#" "mcp_tool_permissions": {"server-a": ["search"]}, "vector_stores": ["store-a"], "agents": [],"#,
     r#" "agent_access_groups": [], "models": [], "mcp_toolsets": [], "blocked_tools": [],"#,
-    r#" "search_tools": [], "mcp_tool_search_enabled": null, "skills": [], "apps": null}"#,
+    r#" "search_tools": [], "mcp_tool_search_enabled": null, "skills": [], "apps": null, "mcp_auth_profiles": {"server-a": "Build"}}"#,
 );
 const FULL_ROW: &str = concat!(
     r#"{"token":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","#,
@@ -328,8 +328,8 @@ async fn insert_team_key(pool: &PgPool) {
     .await;
     execute(
         pool,
-        r#"INSERT INTO "LiteLLM_ObjectPermissionTable" (object_permission_id, mcp_servers, vector_stores, mcp_tool_permissions)
-           VALUES ('kv-permission', ARRAY['server-a'], ARRAY['store-a'], '{"server-a": ["search"]}')"#,
+        r#"INSERT INTO "LiteLLM_ObjectPermissionTable" (object_permission_id, mcp_servers, vector_stores, mcp_tool_permissions, mcp_auth_profiles)
+           VALUES ('kv-permission', ARRAY['server-a'], ARRAY['store-a'], '{"server-a": ["search"]}', '{"server-a":"Build"}')"#,
     )
     .await;
     execute(
@@ -375,10 +375,10 @@ async fn insert_full_key(pool: &PgPool) {
         pool,
         r#"INSERT INTO "LiteLLM_ObjectPermissionTable"
                (object_permission_id, mcp_servers, mcp_access_groups, mcp_tool_permissions, vector_stores, agents,
-                agent_access_groups, models, blocked_tools, mcp_toolsets, search_tools, mcp_tool_search_enabled, skills)
-           VALUES ('full-team-permission', ARRAY['team-server'], NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+                agent_access_groups, models, blocked_tools, mcp_toolsets, search_tools, mcp_tool_search_enabled, skills, mcp_auth_profiles)
+           VALUES ('full-team-permission', ARRAY['team-server'], NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
                   ('full-key-permission', ARRAY['server'], ARRAY['mcp-group'], '{"server": ["tool"]}', ARRAY['store'], ARRAY['agent'],
-                   ARRAY['agent-group'], ARRAY['p-model'], ARRAY['blocked-tool'], ARRAY['toolset'], ARRAY['search-tool'], true, ARRAY['skill'])"#,
+                   ARRAY['agent-group'], ARRAY['p-model'], ARRAY['blocked-tool'], ARRAY['toolset'], ARRAY['search-tool'], true, ARRAY['skill'], '{}')"#,
     )
     .await;
     execute(
@@ -593,6 +593,28 @@ async fn insert_key_with_an_unreadable_permission(pool: &PgPool) {
            VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'legacy-permission')"#,
     )
     .await;
+}
+
+#[rstest]
+#[case::replica(Side::Read)]
+#[case::writer(Side::Writer)]
+#[tokio::test(flavor = "multi_thread")]
+async fn unreadable_profile_grants_preserve_other_permissions(#[case] side: Side) {
+    let postgres = MigratedPostgres::start().await.unwrap();
+    insert_team_key(postgres.pool()).await;
+    execute(
+        postgres.pool(),
+        r#"UPDATE "LiteLLM_ObjectPermissionTable" SET mcp_auth_profiles = '{"server-a": 7}' WHERE object_permission_id = 'kv-permission'"#,
+    )
+    .await;
+    let key = key_database(&postgres)
+        .read(&hash(TEAM_KEY), side)
+        .await
+        .unwrap()
+        .unwrap();
+    let permission = key.object_permission.unwrap();
+    assert_eq!(permission.vector_stores, Some(vec!["store-a".into()]));
+    assert_eq!(permission.mcp_auth_profiles, ProfileGrants::Unreadable);
 }
 
 #[rstest]
