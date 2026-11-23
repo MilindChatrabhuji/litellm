@@ -134,7 +134,7 @@ fn variables(environment: &Environment) -> impl Iterator<Item = Box<str>> + use<
 
 /// The database settings are read as the proxy reads them, and what the proxy holds in its
 /// database beyond keys is not checked. `STORE_MODEL_IN_DB` is `Admit::stored_models`. The JWT settings shape only a caller whose token is a JWT, and the public routes
-/// only one who sends no key.
+/// only one who sends no key. `allowed_routes` is `head::allowed`.
 fn general(config: &Config) -> impl Iterator<Item = Box<str>> + '_ {
     let GeneralSettings {
         master_key: _,
@@ -162,6 +162,7 @@ fn general(config: &Config) -> impl Iterator<Item = Box<str>> + '_ {
         litellm_jwtauth: _,
         allow_user_auth: _,
         token_rate_limit_type: _,
+        allowed_routes: _,
         completion_model,
         max_in_flight_requests_per_worker,
         max_queued_requests_per_worker,
@@ -183,7 +184,6 @@ fn general(config: &Config) -> impl Iterator<Item = Box<str>> + '_ {
         allow_requests_on_db_unavailable,
         allow_client_side_credentials,
         allowed_ips,
-        allowed_routes,
         custom_auth,
         litellm_key_header_name,
         required_customer_headers,
@@ -212,7 +212,6 @@ fn general(config: &Config) -> impl Iterator<Item = Box<str>> + '_ {
             allow_requests_on_db_unavailable,
             allow_client_side_credentials,
             allowed_ips,
-            allowed_routes,
             custom_auth,
             litellm_key_header_name,
             required_customer_headers,

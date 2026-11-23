@@ -45,6 +45,6 @@ pub(super) type Authentication = Result<Authenticated<NativeRows>, litellm_gatew
 pub(super) type Fields = Map<String, Value>;
 
 pub(super) const HEAD: &[fn(&Admit, &Parts) -> Option<Reason>] =
-    &[config::settings, head::route, head::headers];
+    &[config::settings, head::route, head::allowed, head::headers];
 pub(super) const CALLER: &[fn(&Admit, &Authentication) -> Option<Reason>] = &[caller::caller];
 pub(super) const BODY: &[fn(&Admit, &Fields) -> Option<Reason>] = &[body::fields, model::model];

@@ -34,7 +34,8 @@ pub use outcome::{Identity, KeyOutcome, Outcome, Refused};
 pub use public::{ErrorType, PublicDenial};
 pub use request::Request;
 pub use routes::{
-    ManagedRoute, MissingRouteGroup, RouteAllowlist, RouteGroup, RouteGroups, matches_wildcard,
+    ExposedRoutes, ManagedRoute, MissingRouteGroup, RouteAllowlist, RouteGroup, RouteGroups,
+    RouteNotExposed, matches_wildcard,
 };
 pub use settings::{HostFacts, Settings};
 pub use token::{KeyHash, MasterKey, Token};

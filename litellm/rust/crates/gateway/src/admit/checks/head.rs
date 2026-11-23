@@ -22,6 +22,15 @@ pub(super) fn route(admit: &Admit, request: &Parts) -> Option<Reason> {
     messages_only(&admit.config).map(|over| Reason::new(Refused::Settings, over))
 }
 
+/// A route `general_settings.allowed_routes` leaves out, which Python refuses.
+pub(super) fn allowed(admit: &Admit, request: &Parts) -> Option<Reason> {
+    admit
+        .exposed_routes
+        .permits(request.uri.path())
+        .err()
+        .map(|_| Reason::new(Refused::Route, "general_settings.allowed_routes"))
+}
+
 pub(super) fn headers(admit: &Admit, request: &Parts) -> Option<Reason> {
     let headers = &request.headers;
     let query = request.uri.query().unwrap_or_default();
