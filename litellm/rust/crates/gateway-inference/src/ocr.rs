@@ -17,6 +17,7 @@ use crate::{
     error::ErrorFormat,
     hooks::CallType,
     model_restamp::ReportedModel,
+    record::{self, AttemptSeen, Recorder},
     request::{InferenceBody, Upload},
     routing::{self, Host, RouteAttempt},
     serve::{self, Call, Endpoint},
@@ -86,15 +87,26 @@ impl Endpoint for OcrAttempt<'_> {
     const PATH: &'static str = "/ocr";
     const ERRORS: ErrorFormat = ErrorFormat::OpenAi;
 
-    fn render(outcome: Value, _reported: ReportedModel<'_>) -> Result<Response, Error> {
+    fn streamed(_: &Map<String, Value>) -> bool {
+        false
+    }
+
+    fn attempt((_, seen): &mut Self::Outcome) -> AttemptSeen {
+        std::mem::take(seen)
+    }
+
+    fn render(
+        (outcome, _): Self::Outcome,
+        _reported: ReportedModel<'_>,
+    ) -> Result<Response, Error> {
         Ok(Json(outcome).into_response())
     }
 }
 
 impl RouteAttempt for OcrAttempt<'_> {
-    type Outcome = Value;
+    type Outcome = (Value, AttemptSeen);
 
-    async fn run(&self, attempt: &Attempt) -> Result<Value, Error> {
+    async fn run(&self, attempt: &Attempt) -> Result<Self::Outcome, Error> {
         let deployment = &attempt.deployment;
         let document = match &self.upload {
             Some(upload) => OcrDocumentInput::Bytes {
@@ -112,18 +124,40 @@ impl RouteAttempt for OcrAttempt<'_> {
             OcrConnectionInputs {
                 api_key: deployment.params.api_key.clone(),
                 api_base: deployment.params.api_base.clone(),
-                timeout: routing::timeout(attempt, false),
+                timeout: routing::timeout(
+                    deployment,
+                    attempt.timeout,
+                    <Self as Endpoint>::streamed(&self.options),
+                ),
                 ..Default::default()
             },
         )?;
-        let response = self.route.execute(call, &(), None).await?;
-        Ok(match response.provider_native_response {
+        let (response, seen) = record::attempt(self.route.execute(call, &Recorder, None)).await;
+        let response = response?;
+        let outcome = match response.provider_native_response {
             Some(native) => Value::Object(native),
             None => response.into_json(),
-        })
+        };
+        Ok((outcome, seen))
     }
 
-    fn total_tokens(outcome: &Value) -> u64 {
+    fn total_tokens((outcome, _): &Self::Outcome) -> u64 {
         routing::total_tokens(outcome.get("usage"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+    use serde_json::json;
+
+    use super::*;
+
+    #[rstest]
+    #[case::no_stream_flag(json!({"model": "ocr"}))]
+    #[case::a_stream_flag(json!({"model": "ocr", "stream": true}))]
+    fn an_ocr_call_always_runs_under_the_unary_timeout(#[case] body: Value) {
+        let body: Map<String, Value> = serde_json::from_value(body).unwrap();
+        assert!(!<OcrAttempt<'_> as Endpoint>::streamed(&body));
     }
 }

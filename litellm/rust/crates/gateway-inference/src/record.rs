@@ -2,8 +2,10 @@
 //! it so far. [`scoped`] makes one for each request on the inference routes and runs the handler,
 //! every layer inside it and the response body with it in a task-local, so code reaches the call's
 //! record through [`read`] and [`write`] and never takes it as a parameter. A task spawned for the
-//! call keeps it through [`spawn_in_call`].
+//! call keeps it through [`spawn_in_call`]. Each attempt runs in its own [`AttemptSeen`] through
+//! [`attempt`], which [`Recorder`] writes, and the route hands the served one to the record.
 
+mod attempt;
 mod entries;
 
 use std::{
@@ -24,10 +26,14 @@ use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::task::{JoinHandle, futures::TaskLocalFuture};
 
-pub use self::entries::{Ended, Entries};
+pub use self::{
+    attempt::{AttemptSeen, Recorder, ServedDeployment},
+    entries::{Ended, Entries},
+};
 
 tokio::task_local! {
     static RECORD: Arc<CallRecord>;
+    static ATTEMPT: Arc<Mutex<AttemptSeen>>;
 }
 
 /// One call as it stands. Every access is one short lock, never held across an await.
@@ -48,7 +54,7 @@ pub fn scope<F: Future>(record: Arc<CallRecord>, future: F) -> TaskLocalFuture<A
 pub fn write<R>(change: impl FnOnce(&mut Entries) -> R) -> Option<R> {
     RECORD
         .try_with(|record| change(&mut record.0.lock()))
-        .map_err(missed)
+        .map_err(|error| missed("call record", error))
         .ok()
 }
 
@@ -56,13 +62,30 @@ pub fn write<R>(change: impl FnOnce(&mut Entries) -> R) -> Option<R> {
 pub fn read<R>(look: impl FnOnce(&Entries) -> R) -> Option<R> {
     RECORD
         .try_with(|record| look(&record.0.lock()))
-        .map_err(missed)
+        .map_err(|error| missed("call record", error))
         .ok()
 }
 
 /// Adds a header to the answer of the call this code runs in.
 pub fn add_header(name: impl Into<String>, value: impl Into<Value>) {
     write(|entries| entries.add_header(name.into(), value.into()));
+}
+
+/// Runs `future` as one attempt of the call, and hands back what it saw next to its output. The
+/// call's record stays in scope.
+pub async fn attempt<F: Future>(future: F) -> (F::Output, AttemptSeen) {
+    let seen = Arc::new(Mutex::new(AttemptSeen::default()));
+    let output = ATTEMPT.scope(seen.clone(), future).await;
+    let seen = std::mem::take(&mut *seen.lock());
+    (output, seen)
+}
+
+/// Changes what the attempt this code runs in saw. Outside an attempt, which is a bug, it does
+/// nothing.
+fn see(change: impl FnOnce(&mut AttemptSeen)) {
+    let _ = ATTEMPT
+        .try_with(|seen| change(&mut seen.lock()))
+        .map_err(|error| missed("attempt", error));
 }
 
 /// Spawns `future` as part of the call this code runs in, so it reads and writes the same record.
@@ -86,13 +109,13 @@ where
     }
 }
 
-/// A read or write with no record in scope: a spawn that skipped [`spawn_in_call`], or code run
-/// outside a call.
-fn missed(error: impl std::fmt::Display) {
+/// A read or write with no `what` in scope: a spawn that skipped [`spawn_in_call`], or code run
+/// outside a call or an attempt.
+fn missed(what: &str, error: impl std::fmt::Display) {
     if cfg!(debug_assertions) {
-        panic!("no call record in scope: {error}");
+        panic!("no {what} in scope: {error}");
     }
-    tracing::error!(%error, "no call record in scope");
+    tracing::error!(%error, "no {what} in scope");
 }
 
 /// The layer outermost on the inference routes. It makes the request's record and runs the rest

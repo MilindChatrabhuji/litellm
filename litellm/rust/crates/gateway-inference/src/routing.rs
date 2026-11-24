@@ -28,6 +28,7 @@ use crate::{
     error::{Ended, NoDeployments},
     headers::Routing,
     hooks::CallHooks,
+    record::ServedDeployment,
     stream_event::Read,
     stream_hold::{self, Cause, Chunks, Held},
     stream_outcome,
@@ -431,7 +432,11 @@ pub(crate) fn streamed(body: &Map<String, Value>) -> bool {
 
 /// `resolve_llm_passthrough_timeout` over the settings the gateway reads: a streamed call's
 /// `stream_timeout` on the deployment, then the deployment's `timeout`, then the router's.
-pub(crate) fn timeout(attempt: &Attempt, streamed: bool) -> Option<Duration> {
+pub(crate) fn timeout(
+    deployment: &Deployment,
+    router: Option<Duration>,
+    streamed: bool,
+) -> Option<Duration> {
     let seconds = |written: &Option<Spelled<f64>>| {
         let seconds = match written.as_ref()? {
             Spelled::Value(seconds) => *seconds,
@@ -439,12 +444,27 @@ pub(crate) fn timeout(attempt: &Attempt, streamed: bool) -> Option<Duration> {
         };
         Duration::try_from_secs_f64(seconds).ok()
     };
-    let params = &attempt.deployment.params;
+    let params = &deployment.params;
     streamed
         .then(|| seconds(&params.stream_timeout))
         .flatten()
         .or_else(|| seconds(&params.timeout))
-        .or(attempt.timeout)
+        .or(router)
+}
+
+/// The deployment `deployment_id` names in the router's registry, with the timeout its attempt
+/// ran under.
+pub(crate) fn served_deployment<H: Host>(
+    gateway: &Gateway<H>,
+    deployment_id: &str,
+    streamed: bool,
+) -> Option<ServedDeployment> {
+    let deployment = gateway.router.registry().deployment(deployment_id)?;
+    Some(ServedDeployment {
+        model: deployment.params.model.clone(),
+        api_base: deployment.params.api_base.clone(),
+        timeout: timeout(&deployment, gateway.router.settings().timeout, streamed),
+    })
 }
 
 pub(crate) fn api_key(deployment: &Deployment) -> Option<String> {
@@ -554,7 +574,11 @@ mod tests {
         #[case] expected: Option<u64>,
     ) {
         assert_eq!(
-            timeout(&attempt(params, router_timeout), streamed),
+            timeout(
+                &attempt(params, router_timeout).deployment,
+                router_timeout.map(Duration::from_secs),
+                streamed
+            ),
             expected.map(Duration::from_secs)
         );
     }
@@ -601,20 +625,20 @@ mod tests {
         }
     }
 
-    struct RouteHost<'a> {
-        route: &'a Failing,
+    struct RouteHost<'a, A> {
+        route: &'a A,
         cache: litellm_router_core::InMemoryRouterCache,
     }
 
-    impl RouterHost for RouteHost<'_> {
-        type Response = RouteChunks;
+    impl<A: RouteAttempt> RouterHost for RouteHost<'_, A> {
+        type Response = A::Outcome;
         type Failure = Error;
         type Cache = litellm_router_core::InMemoryRouterCache;
 
         async fn attempt(
             &self,
             attempt: &Attempt,
-        ) -> Result<Served<RouteChunks>, AttemptFailure<Error>> {
+        ) -> Result<Served<A::Outcome>, AttemptFailure<Error>> {
             let sent = self
                 .route
                 .run(attempt)
@@ -727,6 +751,94 @@ mod tests {
                 Some(axum::http::StatusCode::INTERNAL_SERVER_ERROR),
                 [0].as_slice()
             )
+        );
+    }
+
+    /// A route whose first attempt fails on the provider after it called it, and whose next one
+    /// serves the call. Each attempt calls a URL of its own.
+    #[derive(Default)]
+    struct FailsOnce {
+        runs: parking_lot::Mutex<u32>,
+    }
+
+    impl RouteAttempt for FailsOnce {
+        type Outcome = crate::record::AttemptSeen;
+
+        async fn run(&self, _attempt: &Attempt) -> Result<Self::Outcome, Error> {
+            let run = {
+                let mut runs = self.runs.lock();
+                *runs += 1;
+                *runs
+            };
+            let wire = litellm_host::interceptors::WireRequest {
+                url: format!("https://provider.test/{run}"),
+                headers: Vec::new(),
+                body: json!({}),
+            };
+            let context = litellm_host::interceptors::RequestContext {
+                model: "test-model".to_owned(),
+                custom_llm_provider: "anthropic".to_owned(),
+                optional_params: json!({}),
+                secret_fields: Vec::new(),
+                api_key: None,
+                host_transport: false,
+            };
+            let (sent, seen) = crate::record::attempt(async {
+                litellm_host::interceptors::Interceptors::<InferenceError>::before_provider_request(
+                    &crate::record::Recorder,
+                    wire,
+                    context,
+                )
+                .await
+            })
+            .await;
+            sent?;
+            match run {
+                1 => Err(Error::Route(
+                    litellm_http::Error::upstream(529, "overloaded".to_owned()).into(),
+                )),
+                _ => Ok(seen),
+            }
+        }
+
+        fn total_tokens(_outcome: &Self::Outcome) -> u64 {
+            0
+        }
+    }
+
+    #[rstest]
+    #[case::retried(lone_primary(json!(null), 1))]
+    #[tokio::test]
+    async fn only_the_attempt_that_served_the_call_reaches_its_record(#[case] router: Router) {
+        let route = FailsOnce::default();
+        let host = RouteHost {
+            route: &route,
+            cache: litellm_router_core::InMemoryRouterCache::default(),
+        };
+        let request = RouterRequest {
+            model: "primary".to_owned(),
+            ..RouterRequest::default()
+        };
+        let record = crate::record::CallRecord::new();
+        let url = crate::record::scope(record, async {
+            let mut routed = router
+                .call(&host, Op::ANTHROPIC_MESSAGES, request)
+                .await
+                .unwrap();
+            let routing = Routing::served(&routed);
+            let seen = std::mem::take(&mut routed.output.response);
+            crate::record::write(|entries| entries.routed(routing, None, seen));
+            crate::record::read(|entries| {
+                entries
+                    .attempt()
+                    .and_then(|seen| seen.url().map(str::to_owned))
+            })
+        })
+        .await;
+
+        assert_eq!(
+            (url.flatten(), *route.runs.lock()),
+            (Some("https://provider.test/2".to_owned()), 2)
         );
     }
 }

@@ -22,7 +22,8 @@ use crate::{
     headers::Routing,
     hooks::{self, CallType},
     model_restamp::ReportedModel,
-    record, request,
+    record::{self, AttemptSeen},
+    request,
     routing::{self, Host, RouteAttempt},
     stream_event::Counts,
 };
@@ -73,6 +74,14 @@ pub(crate) trait Endpoint: RouteAttempt {
         None
     }
 
+    /// Whether a call of this route with `body` runs under a deployment's stream timeout.
+    fn streamed(body: &Map<String, Value>) -> bool {
+        routing::streamed(body)
+    }
+
+    /// What the attempt that ran `outcome` saw, taken out of it.
+    fn attempt(outcome: &mut Self::Outcome) -> AttemptSeen;
+
     /// The outcome that served the call as the response the client reads.
     fn render(outcome: Self::Outcome, reported: ReportedModel<'_>) -> Result<Response, Error>;
 }
@@ -92,12 +101,16 @@ where
     let (gateway, identity) = (&*call.gateway, &call.identity);
     let serve = |hooks: Arc<H::Hooks>, body: Map<String, Value>| async move {
         let model = request::model(&body)?.to_owned();
+        let streamed = E::streamed(&body);
         let endpoint = build(body)?;
         let routed = routing::call(gateway, identity, E::OP, E::PATH, &model, &endpoint).await?;
         let routing = Routing::served(&routed);
+        let deployment = routing::served_deployment(gateway, &routed.deployment_id, streamed);
         let reported = ReportedModel::of(&model, &routed);
         let model_group = routed.model_group;
         let mut outcome = routed.output.response;
+        let seen = E::attempt(&mut outcome);
+        record::write(|entries| entries.routed(routing.clone(), deployment, seen));
         let told = hooks::answered::<E, _>(&hooks, &mut outcome, model_group).await?;
         Ok(told.answer((Extension(routing), E::render(outcome, reported)?)))
     };

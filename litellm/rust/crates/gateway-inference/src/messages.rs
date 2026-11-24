@@ -19,11 +19,11 @@ use litellm_router_core::{Attempt, Deployment, Op};
 use serde_json::{Map, Value};
 
 use crate::{
-    Error, Gateway, JsonObject,
-    caching::CacheHeaders,
+    Error, Gateway, JsonObject, caching,
     error::ErrorFormat,
     hooks::CallType,
     model_restamp::{ReportedModel, Stamp},
+    record::{self, AttemptSeen, Recorder},
     routing::{self, Host, RouteAttempt, RouteChunks},
     serve::{self, Call, Endpoint},
     stream_event::{Counts, Kind, Read, Reading},
@@ -120,22 +120,30 @@ impl<H: Host> Endpoint for MessagesAttempt<'_, H> {
         Some(counts.messages_usage())
     }
 
-    fn render((ran, cache): Self::Outcome, reported: ReportedModel<'_>) -> Result<Response, Error> {
+    fn attempt((_, seen): &mut Self::Outcome) -> AttemptSeen {
+        std::mem::take(seen)
+    }
+
+    fn render((ran, _): Self::Outcome, reported: ReportedModel<'_>) -> Result<Response, Error> {
         let stream =
             Sse::<Messages, _, _>::new(Json, |error| Bytes::from(Error::from(error).sse_frame()));
         let ran = reported.answer(ran, message_start);
         let response = litellm_host_http::render(stream, stream_outcome::bytes(ran))?;
-        Ok(cache.apply(response))
+        Ok(caching::with_cache_key(response))
     }
 }
 
 impl<H: Host> RouteAttempt for MessagesAttempt<'_, H> {
-    type Outcome = (Streamed<Messages>, CacheHeaders);
+    type Outcome = (Streamed<Messages>, AttemptSeen);
 
     async fn run(&self, attempt: &Attempt) -> Result<Self::Outcome, Error> {
         let deployment = &attempt.deployment;
         let call = MessagesCall {
-            timeout: routing::timeout(attempt, routing::streamed(&self.body)),
+            timeout: routing::timeout(
+                deployment,
+                attempt.timeout,
+                <Self as Endpoint>::streamed(&self.body),
+            ),
             ..project(
                 deployment,
                 self.gateway.shaping(&deployment.id),
@@ -144,16 +152,19 @@ impl<H: Host> RouteAttempt for MessagesAttempt<'_, H> {
             )?
         };
         let machine = self.route.clone().machine(call, self.policy);
-        let cache = CacheHeaders::default();
-        let ran = litellm_host_http::run(machine, (), cache.clone(), None).await?;
-        let ran = match ran {
+        let (ran, mut seen) =
+            record::attempt(litellm_host_http::run(machine, (), Recorder, None)).await;
+        let ran = match ran? {
             CallOutput::Complete(body) => CallOutput::Complete(body),
-            CallOutput::Stream { head, chunks } => CallOutput::Stream {
-                head,
-                chunks: sse::blocks(chunks).boxed(),
-            },
+            CallOutput::Stream { head, chunks } => {
+                seen.stream_head(head.headers.clone());
+                CallOutput::Stream {
+                    head,
+                    chunks: sse::blocks(chunks).boxed(),
+                }
+            }
         };
-        Ok((ran, cache))
+        Ok((ran, seen))
     }
 
     fn total_tokens((ran, _): &Self::Outcome) -> u64 {

@@ -5,7 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
 
-use crate::{CallType, ServedCall};
+use super::{AttemptSeen, ServedDeployment};
+use crate::{CallType, ServedCall, headers::Routing};
 
 const MODEL: &str = "model";
 const STREAM: &str = "stream";
@@ -58,6 +59,9 @@ pub struct Entries {
     response_headers: Map<String, Value>,
     served: Option<ServedCall>,
     ended: Option<Ended>,
+    routing: Option<Routing>,
+    served_deployment: Option<ServedDeployment>,
+    attempt: Option<AttemptSeen>,
 }
 
 fn unix_now() -> f64 {
@@ -79,7 +83,36 @@ impl Entries {
             response_headers: Map::new(),
             served: None,
             ended: None,
+            routing: None,
+            served_deployment: None,
+            attempt: None,
         }
+    }
+
+    /// What the router did for the call once it served it, the deployment that served it and
+    /// what the served attempt saw. No attempt that failed or was taken over is written here.
+    pub fn routed(
+        &mut self,
+        routing: Routing,
+        deployment: Option<ServedDeployment>,
+        attempt: AttemptSeen,
+    ) {
+        self.routing = Some(routing);
+        self.served_deployment = deployment;
+        self.attempt = Some(attempt);
+    }
+
+    pub fn routing(&self) -> Option<&Routing> {
+        self.routing.as_ref()
+    }
+
+    pub fn served_deployment(&self) -> Option<&ServedDeployment> {
+        self.served_deployment.as_ref()
+    }
+
+    /// What the attempt that served the call saw.
+    pub fn attempt(&self) -> Option<&AttemptSeen> {
+        self.attempt.as_ref()
     }
 
     /// The route the call came in on, which the route names once it runs.
