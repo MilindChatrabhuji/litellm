@@ -62,7 +62,7 @@ impl<R: Rows> TryFrom<Identity<R>> for Caller<R> {
             Identity::Key(KeyIdentity::NoMasterKey { .. }) => Err(NotACaller::NoMasterKey),
             Identity::Key(KeyIdentity::UserAuthRoute) => Err(NotACaller::UserAuthRoute),
             Identity::Key(KeyIdentity::CachedAdmin { .. }) => Err(NotACaller::CachedAdmin),
-            Identity::MappedJwtKey(..) | Identity::AdminJwt(_) | Identity::FinishedJwt(_) => {
+            Identity::MappedJwtKey(..) | Identity::Jwt(_) | Identity::AutoRegisteredJwt(_) => {
                 Err(NotACaller::Jwt)
             }
         }
@@ -104,7 +104,7 @@ mod tests {
         Token,
         authn::jwt::{KeyOrigin, MappedJwt},
         identity::{
-            jwt::{JwtIdentity, JwtRows},
+            jwt::{AutoRegisteredJwt, JwtIdentity, JwtRows},
             key::TeamGrant,
         },
     };
@@ -151,19 +151,33 @@ mod tests {
         }
     }
 
-    fn mapped_jwt() -> Identity<Stored> {
-        let jwt = MappedJwt {
+    fn mapped(origin: KeyOrigin) -> MappedJwt<String> {
+        MappedJwt {
             claims: Value::Null,
             user_email: None,
             end_user_id: None,
-            origin: KeyOrigin::Mapping,
+            origin,
             user: None,
-        };
-        Identity::MappedJwtKey(jwt, key(stored("stored")))
+        }
+    }
+
+    fn mapped_jwt() -> Identity<Stored> {
+        Identity::MappedJwtKey(mapped(KeyOrigin::Mapping), key(stored("stored")))
+    }
+
+    fn auto_registered_jwt() -> Identity<Stored> {
+        Identity::AutoRegisteredJwt(Box::new(AutoRegisteredJwt {
+            jwt: mapped(KeyOrigin::AutoRegistered {
+                minted: true,
+                org_id: None,
+            }),
+            key: stored("stored"),
+            project: None,
+        }))
     }
 
     fn admin_jwt() -> Identity<Stored> {
-        Identity::AdminJwt(Box::new(JwtIdentity {
+        Identity::Jwt(Box::new(JwtIdentity {
             claims: Value::Null,
             is_proxy_admin: true,
             user_id: None,
@@ -186,7 +200,7 @@ mod tests {
     #[case::cached_admin(Identity::Key(cached_admin()), NotACaller::CachedAdmin)]
     #[case::jwt_mapped_to_a_key(mapped_jwt(), NotACaller::Jwt)]
     #[case::admin_jwt(admin_jwt(), NotACaller::Jwt)]
-    #[case::finished_jwt(Identity::FinishedJwt(stored("stored")), NotACaller::Jwt)]
+    #[case::auto_registered_jwt(auto_registered_jwt(), NotACaller::Jwt)]
     fn an_identity_no_host_serves_never_becomes_a_caller(
         #[case] identity: Identity<Stored>,
         #[case] expected: NotACaller,
