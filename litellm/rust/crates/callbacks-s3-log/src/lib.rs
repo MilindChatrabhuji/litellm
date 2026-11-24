@@ -1,3 +1,11 @@
+#![cfg_attr(
+    test,
+    expect(
+        clippy::disallowed_methods,
+        reason = "only this crate's tests spawn, and no gateway call record reaches them"
+    )
+)]
+
 mod key;
 mod limiter;
 mod settings;

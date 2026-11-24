@@ -1,3 +1,7 @@
+#![expect(
+    clippy::disallowed_methods,
+    reason = "no gateway call record reaches this crate's tests"
+)]
 #![allow(dead_code)]
 
 use std::{

@@ -1,3 +1,8 @@
+#![expect(
+    clippy::disallowed_methods,
+    reason = "no gateway call record reaches this crate's tests"
+)]
+
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use litellm_config::{Config, GeneralSettings};

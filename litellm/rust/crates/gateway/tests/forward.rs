@@ -62,6 +62,10 @@ async fn python() -> (SocketAddr, mpsc::UnboundedReceiver<Received>) {
     });
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test's fake Python upstream runs outside any call"
+    )]
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (address, receiver)
 }
@@ -110,6 +114,10 @@ async fn gateway(python: SocketAddr, admits: bool, root_path: &str) -> SocketAdd
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test's server runs for the whole test, outside any call"
+    )]
     tokio::spawn(litellm_gateway_forward::serve(
         listener,
         format!("http://{python}").parse().unwrap(),
@@ -260,6 +268,10 @@ async fn holding_keys(python: SocketAddr, config: &str, keys: Option<AuthStore>)
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test's server runs for the whole test, outside any call"
+    )]
     tokio::spawn(litellm_gateway_forward::serve(
         listener,
         format!("http://{python}").parse().unwrap(),

@@ -109,6 +109,10 @@ async fn authenticates_before_serving_mounted_inference_routes(
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (shutdown, stopped) = oneshot::channel();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test's server runs for the whole test, outside any call"
+    )]
     let server = tokio::spawn(async move {
         axum::serve(
             listener,

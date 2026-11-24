@@ -7,6 +7,11 @@
 //! repository and its `Database::run`. The shared auth cache in front of the auth objects is composed with them
 //! in `auth-store`, never here. See README.md for the layout.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "no gateway call record reaches this crate"
+)]
+
 macro_rules_attribute::attribute_alias! {
     #[apply(db_row)] =
         #[derive(Clone, Debug, PartialEq, sqlx::FromRow)];

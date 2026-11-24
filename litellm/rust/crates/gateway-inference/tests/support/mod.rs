@@ -193,6 +193,10 @@ pub async fn json(response: Response) -> Value {
 pub async fn truncating_upstream(first_event: &'static str) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test's fake upstream runs outside any call"
+    )]
     tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut request = vec![0; 4096];

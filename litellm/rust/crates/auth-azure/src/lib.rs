@@ -4,6 +4,10 @@ mod requests_transport;
 mod resolve;
 mod retry_after;
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test servers, outside any gateway call"
+)]
 mod test_support;
 mod token_retry;
 mod types;

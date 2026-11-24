@@ -1,3 +1,8 @@
+#![expect(
+    clippy::disallowed_methods,
+    reason = "no gateway call record reaches this crate's tests"
+)]
+
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use litellm_env::Lookup;

@@ -118,6 +118,10 @@ fn hear_evictions(cache: &Arc<AuthCache>, client: &RedisClient) {
     let mut evictions = channel.subscribe();
     let cache = Arc::downgrade(cache);
     let spend_counters = SpendCounters::new(None);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a process-wide eviction listener started with the gateway, outside any call"
+    )]
     tokio::spawn(async move {
         while let Some(invalidation) = evictions.next().await {
             let Some(cache) = cache.upgrade() else {

@@ -3,6 +3,14 @@
 //! against a Python binding, host services and active call hooks. Everything here is Python-specific by
 //! construction; another host language gets its own crate of the same shape.
 
+#![cfg_attr(
+    test,
+    expect(
+        clippy::disallowed_methods,
+        reason = "only this crate's tests spawn, and no gateway call record reaches them"
+    )
+)]
+
 mod argument;
 mod binding;
 mod caller;

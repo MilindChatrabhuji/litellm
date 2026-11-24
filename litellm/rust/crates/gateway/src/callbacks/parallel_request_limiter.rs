@@ -32,7 +32,7 @@ use litellm_callbacks_parallel_request_limiter::{
 use litellm_config::{Config, Environment};
 use litellm_gateway_auth::Authenticated;
 use litellm_gateway_auth_core as auth_core;
-use litellm_gateway_inference::{RateLimited, call_type};
+use litellm_gateway_inference::{RateLimited, call_type, record::spawn_in_call};
 use litellm_redis_client::RedisClient;
 use litellm_redis_store::{Remote, rate_limits::RateLimits};
 use litellm_router_core::Router;
@@ -588,13 +588,13 @@ pub struct Admission {
 impl Drop for Admission {
     fn drop(&mut self) {
         let holds = matches!(*self.phase.lock(), Phase::Admitted | Phase::Succeeded);
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        if tokio::runtime::Handle::try_current().is_err() {
             return;
-        };
+        }
         if holds {
             let limiter = self.limiter.clone();
             let state = std::mem::take(&mut self.state);
-            runtime.spawn(async move { limiter.limiter.release_on_disconnect(&state).await });
+            spawn_in_call(async move { limiter.limiter.release_on_disconnect(&state).await });
         }
     }
 }

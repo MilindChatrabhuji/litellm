@@ -26,6 +26,11 @@
 //! ([`hook_input::SpendLogInput`]) and answers the host calls in [`host`]. The Python spend log
 //! monitor owns the writer's flushes and its shutdown drain.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "no gateway call record reaches this crate"
+)]
+
 mod charge;
 mod customer_margin;
 pub mod hook_input;

@@ -1,3 +1,8 @@
+#![expect(
+    clippy::disallowed_methods,
+    reason = "no gateway call record reaches this crate"
+)]
+
 mod common_utils;
 mod constants;
 mod encoding;

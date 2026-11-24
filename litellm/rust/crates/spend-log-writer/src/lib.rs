@@ -24,6 +24,14 @@
 //!
 //! [`SpendLogRow`]: litellm_callbacks_spend_log::SpendLogRow
 
+#![cfg_attr(
+    test,
+    expect(
+        clippy::disallowed_methods,
+        reason = "only this crate's tests spawn, and no gateway call record reaches them"
+    )
+)]
+
 mod entry;
 mod flusher;
 mod queue;

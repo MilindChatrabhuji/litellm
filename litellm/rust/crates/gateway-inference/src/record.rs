@@ -73,7 +73,15 @@ where
     F::Output: Send + 'static,
 {
     match RECORD.try_get() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the one sanctioned spawn, which carries the call's record"
+        )]
         Ok(record) => tokio::spawn(RECORD.scope(record, future)),
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the one sanctioned spawn, outside a call there is no record to carry"
+        )]
         Err(_) => tokio::spawn(future),
     }
 }

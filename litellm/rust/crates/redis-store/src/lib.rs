@@ -1,3 +1,8 @@
+#![expect(
+    clippy::disallowed_methods,
+    reason = "no gateway call record reaches this crate"
+)]
+
 pub mod active_teams;
 pub mod auth_cache;
 pub mod cache_invalidation;
