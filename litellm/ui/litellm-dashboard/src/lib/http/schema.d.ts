@@ -17532,6 +17532,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/spend/logs/replication": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Spend Log Replication
+         * @description Return the regional request-log capture state, or null before a worker configures it.
+         */
+        get: operations["get_spend_log_replication_spend_logs_replication_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Set Spend Log Replication
+         * @description Pause or resume capture of new local request-log metadata.
+         */
+        patch: operations["set_spend_log_replication_spend_logs_replication_patch"];
+        trace?: never;
+    };
     "/spend/logs/session/ui": {
         parameters: {
             query?: never;
@@ -51014,6 +51038,18 @@ export interface components {
              */
             threshold: number;
         };
+        /** SpendLogReplicationStatus */
+        SpendLogReplicationStatus: {
+            /** Enabled */
+            enabled: boolean;
+            /** Region */
+            region: string;
+        };
+        /** SpendLogReplicationUpdate */
+        SpendLogReplicationUpdate: {
+            /** Enabled */
+            enabled: boolean;
+        };
         /** SpendLogsMetadataFields */
         SpendLogsMetadataFields: {
             /** Exclude */
@@ -82227,6 +82263,59 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LiteLLM_SpendLogs"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_spend_log_replication_spend_logs_replication_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SpendLogReplicationStatus"] | null;
+                };
+            };
+        };
+    };
+    set_spend_log_replication_spend_logs_replication_patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SpendLogReplicationUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SpendLogReplicationStatus"];
                 };
             };
             /** @description Validation Error */
