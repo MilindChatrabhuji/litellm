@@ -3,6 +3,8 @@
 //! closes the record's header bag as it writes, so a header added after the head, a stream's end
 //! included, is refused.
 
+use std::time::Instant;
+
 use axum::{
     extract::Request,
     http::{HeaderMap, HeaderName, HeaderValue},
@@ -11,13 +13,13 @@ use axum::{
 };
 use serde_json::Value;
 
-use super::{AttemptSeen, Entries};
+use super::{AttemptSeen, Entries, deep};
 use crate::{ExposedHeader, headers::Routing};
 
 /// Writes the head of the answer the route gave from the call's record.
 pub(crate) async fn render(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
-    super::write(|entries| head(entries, response.headers_mut()));
+    super::write(|entries| head(entries, response.headers_mut(), Instant::now()));
     response
 }
 
@@ -31,31 +33,41 @@ fn header(name: &str, value: &Value) -> Option<(HeaderName, HeaderValue)> {
     Some((HeaderName::try_from(name).ok()?, value.ok()?))
 }
 
-/// Writes the head `entries` give an answer over `headers`, the route's own. A served answer
-/// carries the served attempt's cache key, then the headers callbacks and Rust code added, each
-/// replacing a header of the route's by its name, then what the router did for the call, which
-/// replaces a callback's header of the same name. An answer to a call that ended on an error
-/// carries only what the router did for the attempt it ended on.
-fn head(entries: &mut Entries, headers: &mut HeaderMap) {
-    let ended = entries.is_error_answer();
+/// Writes the head `entries` give an answer over `headers`, the route's own, as `now`. A served
+/// answer carries the served attempt's cache key, then what the router did for the call, then
+/// the deep headers (`deep.rs`), and last the headers callbacks and Rust code added, each
+/// replacing one of the same name in place, as Python applies `post_call_response_headers_hook`
+/// over `get_custom_headers`. An answer to a call that ended on an error carries what the router
+/// did for the attempt it ended on and the headers the proxy's handler adds to an error.
+fn head(entries: &mut Entries, headers: &mut HeaderMap, now: Instant) {
+    let error = entries.error_answer().cloned();
     let cache_key = entries
         .attempt()
         .and_then(AttemptSeen::cache_key)
-        .filter(|_| !ended)
+        .filter(|_| error.is_none())
         .and_then(|key| HeaderValue::from_str(key).ok());
     let routing = entries.routing().map(Routing::headers);
+    let deep = match &error {
+        None => deep::served(entries, now),
+        Some(error) => deep::ended(entries.call_type(), error),
+    };
     if let Some(key) = cache_key {
         headers.insert(HeaderName::from(ExposedHeader::CacheKey), key);
-    }
-    let added = entries.send_head();
-    if !ended {
-        for (name, value) in added.iter().filter_map(|(name, value)| header(name, value)) {
-            headers.insert(name, value);
-        }
     }
     for (name, value) in routing.into_iter().flatten() {
         if let Some(value) = value.and_then(|value| HeaderValue::from_str(&value).ok()) {
             headers.insert(HeaderName::from_static(name), value);
+        }
+    }
+    for (name, value) in &deep {
+        if let Some((name, value)) = header(name, &Value::from(value.as_str())) {
+            headers.insert(name, value);
+        }
+    }
+    let added = entries.send_head();
+    if error.is_none() {
+        for (name, value) in added.iter().filter_map(|(name, value)| header(name, value)) {
+            headers.insert(name, value);
         }
     }
 }
@@ -66,7 +78,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::record::HeadSent;
+    use crate::record::{ErrorAnswer, HeadSent};
 
     /// A call `d1` served from the cached answer `k1` after one retry, with `added` added to its
     /// answer, and whether it then ended on an error on `d1`.
@@ -83,18 +95,20 @@ mod tests {
                 .unwrap();
         }
         if ended {
-            entries.answered_error(Some(Routing::failed_on("d1")));
+            entries.answered_error(Some(Routing::failed_on("d1")), ErrorAnswer::default());
         }
         entries
     }
 
-    /// The head `entries` give an answer whose route wrote only its content type.
+    /// The head `entries` give an answer whose route wrote only its content type, written as the
+    /// call began.
     fn written(entries: &mut Entries) -> Vec<(String, String)> {
         let mut headers = HeaderMap::from_iter([(
             HeaderName::from_static("content-type"),
             HeaderValue::from_static("application/json"),
         )]);
-        head(entries, &mut headers);
+        let started = entries.started();
+        head(entries, &mut headers, started);
         headers
             .iter()
             .map(|(name, value)| (name.to_string(), value.to_str().unwrap().to_owned()))
@@ -115,13 +129,14 @@ mod tests {
         &[
             ("content-type", "application/json"),
             ("x-litellm-cache-key", "k1"),
-            ("x-callback", "yes"),
-            ("x-count", "3"),
             ("x-litellm-model-id", "d1"),
             ("x-litellm-model-group", "public/model"),
             ("x-litellm-attempted-retries", "1"),
             ("x-litellm-attempted-fallbacks", "0"),
             ("x-litellm-max-retries", "1"),
+            ("x-litellm-response-duration-ms", "0.0"),
+            ("x-callback", "yes"),
+            ("x-count", "3"),
         ]
     )]
     #[case::an_answer_to_a_call_that_ended_on_an_error(
@@ -129,7 +144,7 @@ mod tests {
         true,
         &[("content-type", "application/json"), ("x-litellm-model-id", "d1")]
     )]
-    fn the_head_is_the_routes_own_then_the_cache_key_then_what_was_added_then_the_routing(
+    fn the_head_is_the_routes_own_then_the_record_then_what_was_added(
         #[case] added: &[(&str, Value)],
         #[case] ended: bool,
         #[case] expected: &[(&str, &str)],
@@ -148,6 +163,7 @@ mod tests {
             ("x-litellm-attempted-retries", "1"),
             ("x-litellm-attempted-fallbacks", "0"),
             ("x-litellm-max-retries", "1"),
+            ("x-litellm-response-duration-ms", "0.0"),
         ]
     )]
     #[case::the_cache_key(
@@ -160,21 +176,26 @@ mod tests {
             ("x-litellm-attempted-retries", "1"),
             ("x-litellm-attempted-fallbacks", "0"),
             ("x-litellm-max-retries", "1"),
+            ("x-litellm-response-duration-ms", "0.0"),
         ]
     )]
-    #[case::never_a_routing_header(
+    #[case::a_routing_header(
         "x-litellm-model-id",
         &[
             ("content-type", "application/json"),
             ("x-litellm-cache-key", "k1"),
-            ("x-litellm-model-id", "d1"),
+            ("x-litellm-model-id", "text/plain"),
             ("x-litellm-model-group", "public/model"),
             ("x-litellm-attempted-retries", "1"),
             ("x-litellm-attempted-fallbacks", "0"),
             ("x-litellm-max-retries", "1"),
+            ("x-litellm-response-duration-ms", "0.0"),
         ]
     )]
-    fn a_callbacks_header_replaces_in_place(#[case] name: &str, #[case] expected: &[(&str, &str)]) {
+    fn a_callbacks_header_replaces_any_of_the_same_name_in_place(
+        #[case] name: &str,
+        #[case] expected: &[(&str, &str)],
+    ) {
         let mut entries = entries(&[(name, json!("text/plain"))], false);
         assert_eq!(written(&mut entries), pairs(expected));
     }

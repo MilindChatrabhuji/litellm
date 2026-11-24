@@ -1,7 +1,7 @@
 //! What the gateway knows of one call so far, as typed entries. How a callback reads and writes
 //! them by contract field is the callbacks' own view (`gateway/src/callbacks/fields.rs`).
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
 
@@ -56,6 +56,19 @@ struct ResponseHeaders {
     sent: bool,
 }
 
+/// What the answer to a call that ended on an error tells of how it ended.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ErrorAnswer {
+    /// The error was raised inside the route's handler, past the checks the proxy makes before
+    /// it, so its answer carries the proxy's error headers.
+    pub in_handler: bool,
+    /// The timeout of the provider attempt the call ended on, `None` when no provider attempt
+    /// raised the error.
+    pub timeout: Option<Duration>,
+    /// The provider's response headers on the error the call ended on.
+    pub provider_headers: Vec<(String, String)>,
+}
+
 /// How a call ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ended {
@@ -67,6 +80,7 @@ pub enum Ended {
 pub struct Entries {
     call_type: Option<CallType>,
     start: f64,
+    started: Instant,
     request: Request,
     rate_limit_statuses: Option<Value>,
     response_headers: ResponseHeaders,
@@ -77,7 +91,10 @@ pub struct Entries {
     attempt: Option<AttemptSeen>,
     /// The call ended on an error, whose answer names only what [`Entries::answered_error`]
     /// was told.
-    error_answer: bool,
+    error_answer: Option<ErrorAnswer>,
+    stream_timeout: bool,
+    stream_answer: bool,
+    callback_time: Duration,
 }
 
 fn unix_now() -> f64 {
@@ -91,6 +108,7 @@ impl Entries {
         Self {
             call_type: None,
             start: unix_now(),
+            started: Instant::now(),
             request: Request::Named {
                 model: None,
                 stream: false,
@@ -102,7 +120,10 @@ impl Entries {
             routing: None,
             served_deployment: None,
             attempt: None,
-            error_answer: false,
+            error_answer: None,
+            stream_timeout: false,
+            stream_answer: false,
+            callback_time: Duration::ZERO,
         }
     }
 
@@ -121,14 +142,48 @@ impl Entries {
 
     /// The call ended on an error, which is answered with `routing`, what the router did for the
     /// attempt it ended on, in place of what it did for the call before.
-    pub fn answered_error(&mut self, routing: Option<Routing>) {
+    pub fn answered_error(&mut self, routing: Option<Routing>, answer: ErrorAnswer) {
         self.routing = routing;
-        self.error_answer = true;
+        self.error_answer = Some(answer);
     }
 
-    /// Whether the call is answered with an error.
-    pub fn is_error_answer(&self) -> bool {
-        self.error_answer
+    /// How the call ended, for a call answered with an error.
+    pub fn error_answer(&self) -> Option<&ErrorAnswer> {
+        self.error_answer.as_ref()
+    }
+
+    /// Whether the call's attempts run under a deployment's stream timeout, by the route's own
+    /// rule.
+    pub fn times_as_stream(&mut self, streamed: bool) {
+        self.stream_timeout = streamed;
+    }
+
+    pub fn stream_timeout(&self) -> bool {
+        self.stream_timeout
+    }
+
+    /// The served answer is a stream, whose head goes out before its body.
+    pub fn answers_with_stream(&mut self) {
+        self.stream_answer = true;
+    }
+
+    pub fn is_stream_answer(&self) -> bool {
+        self.stream_answer
+    }
+
+    /// When the record was made, as the request came in on its route.
+    pub fn started(&self) -> Instant {
+        self.started
+    }
+
+    /// Adds the time one hook spent in the callbacks.
+    pub fn add_callback_time(&mut self, spent: Duration) {
+        self.callback_time += spent;
+    }
+
+    /// The time the callbacks spent on the call's hooks so far.
+    pub fn callback_time(&self) -> Duration {
+        self.callback_time
     }
 
     pub fn routing(&self) -> Option<&Routing> {

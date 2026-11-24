@@ -21,7 +21,7 @@ use crate::{
     headers::Routing,
     hooks::{self, CallType},
     model_restamp::ReportedModel,
-    record::{self, AttemptSeen},
+    record::{self, AttemptSeen, Entries, ErrorAnswer},
     request,
     routing::{self, Host, RouteAttempt},
     stream_event::Counts,
@@ -101,6 +101,7 @@ where
     let serve = |hooks: Arc<H::Hooks>, body: Map<String, Value>| async move {
         let model = request::model(&body)?.to_owned();
         let streamed = E::streamed(&body);
+        record::write(|entries| entries.times_as_stream(streamed));
         let endpoint = build(body)?;
         let routed = routing::call(gateway, identity, E::OP, E::PATH, &model, &endpoint).await?;
         let routing = Routing::served(&routed);
@@ -109,7 +110,13 @@ where
         let model_group = routed.model_group;
         let mut outcome = routed.output.response;
         let seen = E::attempt(&mut outcome);
-        record::write(|entries| entries.routed(routing, deployment, seen));
+        let stream = E::held(&mut outcome).is_some();
+        record::write(|entries| {
+            entries.routed(routing, deployment, seen);
+            if stream {
+                entries.answers_with_stream();
+            }
+        });
         let told = hooks::answered::<E, _>(&hooks, &mut outcome, model_group).await?;
         Ok(told.answer(E::render(outcome, reported)?))
     };
@@ -120,7 +127,26 @@ where
     };
     served.unwrap_or_else(|mut ended| {
         let routing = ended.routing.take();
-        record::write(|entries| entries.answered_error(routing));
+        let answer = error_answer(gateway, routing.as_ref(), &ended.error);
+        record::write(|entries| entries.answered_error(routing, answer));
         ended.response(E::ERRORS, call.request_id.as_deref())
     })
+}
+
+/// How a call that ended on `error` is answered, `routing` naming the attempt it ended on.
+fn error_answer<H: Host>(
+    gateway: &Gateway<H>,
+    routing: Option<&Routing>,
+    error: &Error,
+) -> ErrorAnswer {
+    let streamed = record::read(Entries::stream_timeout).unwrap_or(false);
+    let timeout = routing
+        .filter(|_| error.raised_by_provider())
+        .and_then(|routing| routing::served_deployment(gateway, routing.deployment_id(), streamed))
+        .and_then(|deployment| deployment.timeout);
+    ErrorAnswer {
+        in_handler: error.in_handler(),
+        timeout,
+        provider_headers: error.provider_headers(),
+    }
 }

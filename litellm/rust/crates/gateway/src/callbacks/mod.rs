@@ -9,7 +9,7 @@ mod fields;
 pub mod model_capacity;
 pub mod parallel_request_limiter;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use axum::http::StatusCode;
 use litellm_callbacks::{
@@ -202,8 +202,17 @@ fn refusal(abort: Abort) -> Refusal {
 
 impl Call {
     /// Runs the hook of `point` over the callbacks subscribed to it, in order. On a hook that
-    /// decides, the first to abort or fail ends it and the call.
+    /// decides, the first to abort or fail ends it and the call. The time the hook took is added
+    /// to the call's callback time.
     async fn run(&self, point: Point) -> Result<(), HookError> {
+        let began = Instant::now();
+        let ran = self.run_turns(point).await;
+        record::write(|entries| entries.add_callback_time(began.elapsed()));
+        ran
+    }
+
+    /// The turns of [`run`](Self::run), in order.
+    async fn run_turns(&self, point: Point) -> Result<(), HookError> {
         let hook = point.hook();
         for (registered, state) in self.callbacks.callbacks.iter().zip(&self.states) {
             let callback = &registered.callback;

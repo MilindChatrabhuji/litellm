@@ -7,6 +7,7 @@
 //! [`render`] writes the answer's head from the record in one pass.
 
 mod attempt;
+mod deep;
 mod entries;
 mod render;
 
@@ -31,7 +32,7 @@ use tokio::task::{JoinHandle, futures::TaskLocalFuture};
 pub(crate) use self::render::render;
 pub use self::{
     attempt::{AttemptSeen, Recorder, ServedDeployment},
-    entries::{Ended, Entries, HeadSent},
+    entries::{Ended, Entries, ErrorAnswer, HeadSent},
 };
 
 tokio::task_local! {

@@ -9,14 +9,16 @@ use litellm_host::interceptors::{
     WireRequest,
 };
 
-/// What one attempt saw of its provider: where it called, when its request went out and its
-/// response head came back, the headers that head carried and where its result came from.
+/// What one attempt saw of its provider: where it called, when its request went out, its
+/// response head came back and its result was ready, the headers that head carried and where
+/// its result came from.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AttemptSeen {
     url: Option<String>,
     sent: Option<Instant>,
     head: Option<Instant>,
     wait: Option<Duration>,
+    ready: Option<Instant>,
     provider_headers: Vec<(String, String)>,
     source: Option<ResultSource>,
 }
@@ -40,6 +42,11 @@ impl AttemptSeen {
     /// How long the provider took from the request sent to its response head.
     pub fn wait(&self) -> Option<Duration> {
         self.wait
+    }
+
+    /// When the core had the attempt's result ready, a complete answer read and transformed.
+    pub fn ready(&self) -> Option<Instant> {
+        self.ready
     }
 
     pub fn provider_headers(&self) -> &[(String, String)] {
@@ -126,7 +133,10 @@ impl<E> Interceptors<E> for Recorder {
     }
 
     async fn result_ready(&self, facts: ExecutionFacts) -> Result<(), E> {
-        super::see(|seen| seen.source = Some(facts.source));
+        super::see(|seen| {
+            seen.ready = Some(Instant::now());
+            seen.source = Some(facts.source);
+        });
         Ok(())
     }
 }

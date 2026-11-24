@@ -179,6 +179,37 @@ impl Error {
         }
     }
 
+    /// Whether the proxy raises this error inside the route's handler, where its answer carries
+    /// the proxy's error headers. A model the caller may not reach and a body that cannot be read
+    /// are refused before the handler runs.
+    pub(crate) fn in_handler(&self) -> bool {
+        !matches!(
+            self,
+            Self::ModelAccess(_) | Self::InvalidBody(_) | Self::BodyTooLarge
+        )
+    }
+
+    /// Whether a provider attempt raised this error.
+    pub(crate) fn raised_by_provider(&self) -> bool {
+        matches!(self, Self::Route(_) | Self::Ocr(_))
+    }
+
+    /// The provider's response headers on the error, empty for an error no provider answered.
+    pub(crate) fn provider_headers(&self) -> Vec<(String, String)> {
+        match self {
+            Self::Route(error) => error.upstream_headers().to_vec(),
+            Self::Ocr(error) => error
+                .upstream_response()
+                .into_iter()
+                .flat_map(|(_, _, headers)| headers.iter())
+                .filter_map(|(name, value)| {
+                    Some((name.as_str().to_owned(), value.to_str().ok()?.to_owned()))
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     pub fn openai_response(self) -> Response {
         let body = Json(self.openai_body());
         match self {

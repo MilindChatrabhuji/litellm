@@ -63,6 +63,11 @@ impl Routing {
         }
     }
 
+    /// The deployment the last attempt ran on.
+    pub(crate) fn deployment_id(&self) -> &str {
+        &self.deployment_id
+    }
+
     /// The model group that served the call, an alias resolved, `None` for a call that ended on
     /// a failed attempt.
     pub(crate) fn counted_group(&self) -> Option<&str> {
