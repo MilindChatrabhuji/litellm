@@ -68,6 +68,7 @@ from litellm.proxy._types import (
     SpendLogsPayload,
     SpendLogsRouterMetadata,
 )
+from litellm.proxy.db.column_types import conform_spend_log_columns
 from litellm.proxy.route_llm_request import GENERATE_CONTENT_SPEND_ENDPOINTS, ProxyModelNotFoundError
 from litellm.proxy.spend_tracking.rust_spend_log_rows import spendlogs_payload_rust, uses_spend_logs_ledger
 from litellm.proxy.utils import PrismaClient, hash_token, query_raw_within_statement_timeout
@@ -649,11 +650,21 @@ def get_logging_payload(
         kwargs = {}
 
     if uses_spend_logs_ledger():
-        return spendlogs_payload_rust(kwargs, response_obj, start_time, end_time, llm_router)  # pyright: ignore[reportUnknownArgumentType]  # the logging kwargs dict is untyped upstream
+        return cast(  # cast-ok: the conformed copy has the payload's keys
+            SpendLogsPayload,
+            conform_spend_log_columns(
+                spendlogs_payload_rust(kwargs, response_obj, start_time, end_time, llm_router)  # pyright: ignore[reportUnknownArgumentType]  # the logging kwargs dict is untyped upstream
+            ),
+        )
 
     from litellm.proxy.spend_tracking import legacy_spend_log_rows
 
-    return legacy_spend_log_rows.logging_payload(kwargs, response_obj, start_time, end_time, llm_router)
+    return cast(  # cast-ok: the conformed copy has the payload's keys
+        SpendLogsPayload,
+        conform_spend_log_columns(
+            legacy_spend_log_rows.logging_payload(kwargs, response_obj, start_time, end_time, llm_router)
+        ),
+    )
 
 
 def caller_session_for_accounting(kwargs: Mapping[str, object]) -> str | None:

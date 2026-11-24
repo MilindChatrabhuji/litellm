@@ -2,11 +2,12 @@ import asyncio
 import datetime
 import json
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from datetime import timezone
-from types import MappingProxyType
-from typing import Any, Final, cast
+from decimal import Decimal
+from types import MappingProxyType, UnionType
+from typing import Any, Final, Union, cast, get_args, get_origin
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -15,55 +16,32 @@ from pydantic import TypeAdapter
 from typing_extensions import NotRequired, ReadOnly, TypedDict
 
 import litellm
-import litellm.constants as litellm_constants
-import litellm.proxy.spend_tracking.spend_tracking_utils as spend_tracking_utils
 from litellm.constants import (
+    CALLER_SESSION_ID_METADATA_KEY,
+    INTERNAL_CALL_ORIGIN_METADATA_KEY,
     KUBERNETES_POD_ROUTING_KEY,
     LITELLM_TRUNCATED_PAYLOAD_FIELD,
     LITELLM_TRUNCATION_DB_SAFEGUARD_NOTE,
     LITTELM_CLI_SERVICE_ACCOUNT_NAME,
     LITTELM_INTERNAL_HEALTH_SERVICE_ACCOUNT_NAME,
+    MANAGED_BACKGROUND_RESPONSE_METADATA_KEY,
     MAX_SPEND_LOG_MODEL_NAME_LENGTH,
     REDACTED_BY_LITELM_STRING,
     SESSION_ID_GENERATED_METADATA_KEY,
     SESSION_ID_OMITTED_METADATA_KEY,
     UNKNOWN_MODEL_SPEND_LOG_MODEL,
 )
-from litellm.constants import (
-    CALLER_SESSION_ID_METADATA_KEY,
-    INTERNAL_CALL_ORIGIN_METADATA_KEY,
-    MANAGED_BACKGROUND_RESPONSE_METADATA_KEY,
-)
-from litellm.litellm_core_utils.litellm_logging import StandardLoggingPayloadSetup
-from litellm.litellm_core_utils.litellm_logging import get_standard_logging_object_payload
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
-from litellm.llms.base_llm.ocr.transformation import OCRResponse, OCRUsageInfo
+from litellm.litellm_core_utils.litellm_logging import StandardLoggingPayloadSetup, get_standard_logging_object_payload
 from litellm.litellm_core_utils.safe_json_dumps import safe_dumps
+from litellm.llms.base_llm.ocr.transformation import OCRResponse, OCRUsageInfo
 from litellm.proxy._types import SpendLogsMetadata, SpendLogsMetadataFields, SpendLogsPayload, UserAPIKeyAuth
+from litellm.proxy.db.column_types import conform_spend_log_columns
 from litellm.proxy.litellm_pre_call_utils import LiteLLMProxyRequestSetup, add_litellm_data_to_request
 from litellm.proxy.pass_through_endpoints.llm_passthrough_endpoints import get_passthrough_router_request_metadata
 from litellm.proxy.pass_through_endpoints.pass_through_endpoints import HttpPassThroughEndpointHelpers
-from litellm.types.passthrough_endpoints.pass_through_endpoints import PassthroughStandardLoggingPayload
 from litellm.proxy.route_llm_request import ProxyModelNotFoundError
-from litellm.proxy.spend_tracking.spend_tracking_utils import (
-    _extract_usage_for_ocr_call,
-    _get_session_id_for_spend_log,
-    _get_spend_logs_metadata,
-    _get_vector_store_request_for_spend_logs_payload,
-    is_master_key,
-    redact_logged_api_key,
-    _redact_prompt_leaks_in_error_string,
-    sanitize_error_information_for_spend_logs,
-    _sanitize_guardrail_information_for_spend_logs,
-    _sanitize_request_body_for_spend_logs_payload,
-    configured_spend_logs_metadata_fields,
-    get_logging_payload,
-    get_logging_payload_async,
-    get_spend_logs_id,
-    requester_ip_address_logging_disabled,
-    should_store_prompts_and_responses_in_spend_logs,
-    spend_log_row_with_retained_metadata,
-)
+from litellm.proxy.spend_tracking import spend_tracking_utils
 from litellm.proxy.spend_tracking.legacy_spend_log_rows import (
     _get_messages_for_spend_logs_payload,
     _get_proxy_server_request_for_spend_logs_payload,
@@ -72,22 +50,42 @@ from litellm.proxy.spend_tracking.legacy_spend_log_rows import (
     _scrub_raw_model_from_error_information,
     _stored_request_without_requester_ip_address,
 )
-from litellm.proxy.utils import hash_token
-from litellm.types.proxy.auth.customer_hierarchy import CustomerHierarchyAuth
+from litellm.proxy.spend_tracking.spend_tracking_utils import (
+    _extract_usage_for_ocr_call,
+    _get_session_id_for_spend_log,
+    _get_spend_logs_metadata,
+    _get_vector_store_request_for_spend_logs_payload,
+    _redact_prompt_leaks_in_error_string,
+    _sanitize_guardrail_information_for_spend_logs,
+    _sanitize_request_body_for_spend_logs_payload,
+    configured_spend_logs_metadata_fields,
+    get_logging_payload,
+    get_logging_payload_async,
+    get_spend_logs_id,
+    is_master_key,
+    redact_logged_api_key,
+    requester_ip_address_logging_disabled,
+    sanitize_error_information_for_spend_logs,
+    should_store_prompts_and_responses_in_spend_logs,
+    spend_log_row_with_retained_metadata,
+)
+from litellm.proxy.utils import ProxyUpdateSpend, hash_token, jsonify_object
 from litellm.types.passthrough_endpoints.pass_through_endpoints import (
     SETTLES_BACKGROUND_RESPONSE_KWARG,
     BackgroundResponseSettlement,
+    PassthroughStandardLoggingPayload,
 )
+from litellm.types.proxy.auth.customer_hierarchy import CustomerHierarchyAuth
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.utils import (
     BACKGROUND_RESPONSE_COST_POLL_CALL_ORIGIN,
     LiteLLMBatch,
+    StandardLoggingGuardrailInformation,
     StandardLoggingHiddenParams,
     StandardLoggingMetadata,
     StandardLoggingModelInformation,
     StandardLoggingPayload,
     StandardLoggingPayloadErrorInformation,
-    StandardLoggingGuardrailInformation,
     StandardLoggingVectorStoreRequest,
 )
 
@@ -1123,8 +1121,8 @@ def test_large_request_no_truncation_threshold():
     and that the new truncation logic keeps beginning (35%) and end (65%) of the string
     """
     from litellm.constants import (
-        MAX_STRING_LENGTH_PROMPT_IN_DB,
         LITELLM_TRUNCATED_PAYLOAD_FIELD,
+        MAX_STRING_LENGTH_PROMPT_IN_DB,
     )
 
     # Create a large string that exceeds the threshold
@@ -1207,6 +1205,7 @@ def test_configurable_string_length_env_var(monkeypatch):
 
     # Import after setting env var to ensure it picks up the new value
     import importlib
+
     import litellm.constants
     import litellm.proxy.spend_tracking.spend_tracking_utils
 
@@ -1214,8 +1213,8 @@ def test_configurable_string_length_env_var(monkeypatch):
     importlib.reload(litellm.proxy.spend_tracking.spend_tracking_utils)
 
     from litellm.constants import (
-        MAX_STRING_LENGTH_PROMPT_IN_DB,
         LITELLM_TRUNCATED_PAYLOAD_FIELD,
+        MAX_STRING_LENGTH_PROMPT_IN_DB,
     )
     from litellm.proxy.spend_tracking.spend_tracking_utils import (
         _sanitize_request_body_for_spend_logs_payload,
@@ -1251,8 +1250,8 @@ def test_truncation_preserves_beginning_and_end():
     Test that truncation preserves the beginning (35%) and end (65%) of content for better debugging
     """
     from litellm.constants import (
-        MAX_STRING_LENGTH_PROMPT_IN_DB,
         LITELLM_TRUNCATED_PAYLOAD_FIELD,
+        MAX_STRING_LENGTH_PROMPT_IN_DB,
     )
 
     # Create content with distinct beginning, middle, and end
@@ -9062,3 +9061,288 @@ async def test_client_metadata_cannot_attribute_a_chat_request_to_generate_conte
     )
     assert updated["metadata"]["user_api_key_request_route"] == "/chat/completions"
     assert "route_call_type" not in stored
+
+
+_FIELD_TEST_STARTED: Final = datetime.datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+_FIELD_TEST_FINISHED: Final = datetime.datetime(2026, 1, 2, 3, 4, 6, tzinfo=timezone.utc)
+
+
+_LIST_OF_DICTS: Final = [{"k": "v"}]
+
+
+def _kwargs_carrying_field(where: str, field: str, value: object) -> Mapping[str, object]:
+    metadata: Final = {"user_api_key": "sk-test", **({field: value} if where == "metadata" else {})}
+    litellm_params: Final = {"metadata": metadata, **({field: value} if where == "litellm_params" else {})}
+    return {"model": "gpt-4o", "litellm_params": litellm_params, **({field: value} if where == "kwargs" else {})}
+
+
+def _logged_field_payload(kwargs: Mapping[str, object], response_obj: object = None) -> SpendLogsPayload:
+    with patch("litellm.proxy.proxy_server.general_settings", {"use_spend_logs_ledger": False}):
+        return get_logging_payload(
+            kwargs=dict(kwargs),
+            response_obj={"id": "r"} if response_obj is None else response_obj,
+            start_time=_FIELD_TEST_STARTED,
+            end_time=_FIELD_TEST_FINISHED,
+        )
+
+
+@patch("litellm.proxy.proxy_server.master_key", None)
+@pytest.mark.parametrize(
+    "where, field, column",
+    [
+        ("kwargs", "agent_id", "agent_id"),
+        ("metadata", "agent_id", "agent_id"),
+        ("kwargs", "custom_llm_provider", "custom_llm_provider"),
+        ("litellm_params", "api_base", "api_base"),
+        ("metadata", "billing_agent_id", "billing_agent_id"),
+        ("metadata", "user_api_key_team_id", "team_id"),
+        ("metadata", "user_api_key_org_id", "organization_id"),
+        ("metadata", "user_api_key_user_id", "user"),
+        ("metadata", "requester_ip_address", "requester_ip_address"),
+    ],
+)
+def test_a_list_in_a_request_field_is_written_as_an_empty_optional_column(where: str, field: str, column: str) -> None:
+    payload: Final = _logged_field_payload(_kwargs_carrying_field(where, field, _LIST_OF_DICTS))
+
+    assert payload[column] is None
+
+
+@patch("litellm.proxy.proxy_server.master_key", None)
+def test_a_list_agent_id_beside_a_string_metadata_agent_id_is_written_as_null() -> None:
+    kwargs: Final = {**_kwargs_carrying_field("metadata", "agent_id", "a1"), "agent_id": _LIST_OF_DICTS}
+
+    payload: Final = _logged_field_payload(kwargs)
+
+    assert payload["agent_id"] is None
+
+
+@patch("litellm.proxy.proxy_server.master_key", None)
+def test_a_list_in_each_required_number_column_is_written_as_zero() -> None:
+    usage: Final = {"total_tokens": [1], "prompt_tokens": ("x",), "completion_tokens": {1}}
+    kwargs: Final = {**_kwargs_carrying_field("kwargs", "x", None), "response_cost": [0.5]}
+
+    payload: Final = _logged_field_payload(kwargs, response_obj={"id": "r", "usage": usage})
+
+    assert (payload["total_tokens"], payload["prompt_tokens"], payload["completion_tokens"], payload["spend"]) == (
+        0,
+        0,
+        0,
+        0,
+    )
+
+
+@patch("litellm.proxy.proxy_server.master_key", None)
+def test_legitimate_values_in_scalar_columns_are_written_unchanged() -> None:
+    usage: Final = {"total_tokens": 12.0, "prompt_tokens": True, "completion_tokens": 3}
+    kwargs: Final = {
+        **_kwargs_carrying_field("kwargs", "agent_id", "agent-1"),
+        "response_cost": Decimal("0.0042"),
+        "custom_llm_provider": "openai",
+    }
+
+    payload: Final = _logged_field_payload(kwargs, response_obj={"id": "r", "usage": usage})
+
+    assert payload["total_tokens"] == 12.0 and isinstance(payload["total_tokens"], float)
+    assert payload["prompt_tokens"] is True
+    assert payload["completion_tokens"] == 3
+    assert payload["spend"] == Decimal("0.0042") and isinstance(payload["spend"], Decimal)
+    assert payload["agent_id"] == "agent-1"
+    assert payload["custom_llm_provider"] == "openai"
+    assert payload["startTime"] == _FIELD_TEST_STARTED
+    assert payload["completionStartTime"] == _FIELD_TEST_FINISHED
+    assert payload["request_duration_ms"] == 1000
+
+
+class _SpendLogsTable:
+    def __init__(self) -> None:
+        self.written_rows: Final[list[Mapping[str, object]]] = []  # mutable-ok: records what the fake receives
+
+    async def create_many(self, data: Sequence[Mapping[str, object]], skip_duplicates: bool) -> int:
+        self.written_rows.extend(dict(row) for row in data)
+        return len(data)
+
+
+class _Db:
+    def __init__(self) -> None:
+        self.litellm_spendlogs: Final = _SpendLogsTable()
+
+
+class _SpendLogsClient:
+    def __init__(self) -> None:
+        self.db: Final = _Db()
+        self.spend_log_transactions: Final[list[Mapping[str, object]]] = []  # mutable-ok: stands in for the queue
+        self._spend_log_transactions_lock: Final = asyncio.Lock()
+
+    def jsonify_object(self, data: Mapping[str, object]) -> Mapping[str, object]:
+        return jsonify_object(dict(data))
+
+
+class _Response:
+    status_code: Final = 200
+
+
+class _ReceivingWriter:
+    def __init__(self) -> None:
+        self.posted: Final[list[str]] = []  # mutable-ok: records what the fake receives
+
+    async def post(self, url: str, data: str, headers: Mapping[str, str]) -> _Response:
+        self.posted.append(data)
+        return _Response()
+
+
+def _queued_spend_row(agent_id: object) -> Mapping[str, object]:
+    kwargs: Final = {**_kwargs_carrying_field("kwargs", "agent_id", agent_id), "litellm_call_id": "call-1"}
+    with patch("litellm.proxy.proxy_server.master_key", None):
+        payload: Final = _logged_field_payload(kwargs)
+    return {
+        **payload,
+        "startTime": _FIELD_TEST_STARTED.isoformat(),
+        "endTime": _FIELD_TEST_FINISHED.isoformat(),
+        "completionStartTime": _FIELD_TEST_FINISHED.isoformat(),
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "agent_id, written_agent_id",
+    [
+        (_LIST_OF_DICTS, None),
+        (("agent-1",), None),
+        (42, None),
+        (42.5, None),
+        (True, None),
+        ("42", "42"),
+        ({"agent-1"}, None),
+        ({"nested": "agent-1"}, '{"nested": "agent-1"}'),
+        ("agent-1", "agent-1"),
+        (None, None),
+    ],
+)
+async def test_a_flushed_spend_row_is_written_with_its_agent_id_column_held_to_a_string_or_null(
+    agent_id: object, written_agent_id: object
+) -> None:
+    client: Final = _SpendLogsClient()
+
+    await ProxyUpdateSpend.update_spend_logs(
+        n_retry_times=0,
+        prisma_client=client,  # pyright: ignore[reportArgumentType]  # stands in for the DB client
+        db_writer_client=None,
+        proxy_logging_obj=MagicMock(),
+        logs_to_process=[_queued_spend_row(agent_id)],
+    )
+
+    (row,) = client.db.litellm_spendlogs.written_rows
+    assert row["agent_id"] == written_agent_id
+
+
+@pytest.mark.asyncio
+async def test_the_row_posted_to_spend_logs_url_has_its_agent_id_column_held_to_a_string_or_null(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SPEND_LOGS_URL", "http://writer.invalid")
+    writer: Final = _ReceivingWriter()
+
+    await ProxyUpdateSpend.update_spend_logs(
+        n_retry_times=0,
+        prisma_client=_SpendLogsClient(),  # pyright: ignore[reportArgumentType]  # stands in for the DB client
+        db_writer_client=writer,  # pyright: ignore[reportArgumentType]  # stands in for the HTTP client
+        proxy_logging_obj=MagicMock(),
+        logs_to_process=[_queued_spend_row(_LIST_OF_DICTS), _queued_spend_row("agent-1")],
+    )
+
+    (posted,) = writer.posted
+    assert [row["agent_id"] for row in json.loads(posted)] == [None, "agent-1"]
+
+
+def _scalar_kind(annotation: object) -> tuple[str, bool] | None:
+    if get_origin(annotation) in (Union, UnionType):
+        members: Final = [member for member in get_args(annotation) if member is not type(None)]
+        kind: Final = _scalar_kind(members[0]) if len(members) == 1 else None
+        return None if kind is None else (kind[0], True)
+    return (annotation.__name__, False) if annotation in (str, int, float) else None
+
+
+def _scalar_columns() -> dict[str, tuple[str, bool]]:
+    from prisma.models import LiteLLM_SpendLogs
+
+    return {
+        name: kind for name, field in LiteLLM_SpendLogs.model_fields.items() if (kind := _scalar_kind(field.annotation))
+    }
+
+
+SCALAR_COLUMNS: Final = _scalar_columns()
+JSON_COLUMNS: Final = ("messages", "response", "metadata", "request_tags", "proxy_server_request")
+CONTAINERS: Final = (
+    pytest.param([{"k": "v"}], id="list_of_dicts"),
+    pytest.param([], id="empty_list"),
+    pytest.param(("a", "b"), id="tuple"),
+    pytest.param({"a"}, id="set"),
+)
+LEGITIMATE_VALUES: Final = (
+    pytest.param("text", id="str"),
+    pytest.param(7, id="int"),
+    pytest.param(12.0, id="float"),
+    pytest.param(Decimal("0.0042"), id="decimal"),
+    pytest.param(True, id="bool"),
+    pytest.param(datetime.datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc), id="datetime"),
+    pytest.param(None, id="none"),
+    pytest.param({"k": "v"}, id="dict"),
+)
+
+
+@pytest.mark.parametrize("value", CONTAINERS)
+def test_a_container_in_each_kind_of_scalar_column_is_replaced_by_that_columns_empty_value(value: object) -> None:
+    row: Final = {
+        "request_id": value,
+        "agent_id": value,
+        "total_tokens": value,
+        "request_duration_ms": value,
+        "spend": value,
+    }
+
+    assert conform_spend_log_columns(row) == {
+        "request_id": "",
+        "agent_id": None,
+        "total_tokens": 0,
+        "request_duration_ms": None,
+        "spend": 0,
+    }
+
+
+@pytest.mark.parametrize("column", sorted(SCALAR_COLUMNS))
+@pytest.mark.parametrize("value", CONTAINERS)
+def test_a_container_in_any_scalar_column_of_the_generated_model_is_replaced(column: str, value: object) -> None:
+    kind, optional = SCALAR_COLUMNS[column]
+
+    conformed: Final = conform_spend_log_columns({column: value})
+
+    assert conformed == {column: None if optional else ("" if kind == "str" else 0)}
+
+
+def test_conforming_returns_a_new_row_and_leaves_the_given_row_as_it_was() -> None:
+    row: Final = {"agent_id": ["x"], "total_tokens": 3}
+
+    conformed: Final = conform_spend_log_columns(row)
+
+    assert row == {"agent_id": ["x"], "total_tokens": 3}
+    assert conformed == {"agent_id": None, "total_tokens": 3}
+
+
+@pytest.mark.parametrize("column", sorted(set(SCALAR_COLUMNS) - {"agent_id"}))
+@pytest.mark.parametrize("value", LEGITIMATE_VALUES)
+def test_a_value_that_is_not_a_container_is_kept_as_the_same_object(column: str, value: object) -> None:
+    conformed: Final = conform_spend_log_columns({column: value})
+
+    assert conformed[column] is value
+
+
+@pytest.mark.parametrize("column", JSON_COLUMNS)
+@pytest.mark.parametrize("value", [[{"k": "v"}], ("a",), {"a"}, {"k": "v"}, '{"a": 1}'])
+def test_a_json_column_is_not_touched(column: str, value: object) -> None:
+    conformed: Final = conform_spend_log_columns({column: value})
+
+    assert conformed[column] is value
+
+
+def test_columns_the_row_lacks_are_left_alone() -> None:
+    assert conform_spend_log_columns({"unrelated": ["kept"]}) == {"unrelated": ["kept"]}

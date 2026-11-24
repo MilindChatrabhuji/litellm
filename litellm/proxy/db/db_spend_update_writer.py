@@ -1897,9 +1897,9 @@ class DBSpendUpdateWriter:
         response_cost: float | None,
         agent_id: str | None,
         prisma_client: PrismaClient | None,
-    ):
+    ) -> None:
         try:
-            if agent_id is None or prisma_client is None:
+            if not isinstance(agent_id, str) or prisma_client is None:
                 return
 
             await self.spend_update_queue.add_update(

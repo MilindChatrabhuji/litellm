@@ -6620,3 +6620,33 @@ async def test_a_row_without_a_caller_session_or_cost_adds_nothing(litellm_param
 
     assert await totals.read("hashed-key", "cc-session-1") is None
     assert await totals.read("hashed-key", "minted-1") is None
+
+
+NOT_A_STRING_AGENT_IDS: Final = (
+    pytest.param({"a": 1}, id="dict"),
+    pytest.param([{"a": 1}], id="list_of_dicts"),
+    pytest.param(("a",), id="tuple"),
+    pytest.param({"a"}, id="set"),
+    pytest.param(7, id="int"),
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_id", NOT_A_STRING_AGENT_IDS)
+async def test_an_agent_id_that_is_not_a_string_enqueues_no_agent_spend_and_the_flush_keeps_the_other_entities(
+    agent_id: object,
+) -> None:
+    writer: Final = DBSpendUpdateWriter()
+    await writer.spend_update_queue.add_update(
+        update=SpendUpdateQueueItem(entity_type=Litellm_EntityType.KEY, entity_id="key-1", response_cost=0.25)
+    )
+
+    await writer._update_agent_db(
+        response_cost=0.25,
+        agent_id=agent_id,  # pyright: ignore[reportArgumentType]  # request values are untyped
+        prisma_client=MagicMock(),
+    )
+
+    transactions: Final = await writer.spend_update_queue.flush_and_get_aggregated_db_spend_update_transactions()
+    assert transactions["key_list_transactions"] == {"key-1": 0.25}
+    assert transactions["agent_list_transactions"] == {}
