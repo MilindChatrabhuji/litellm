@@ -4,10 +4,7 @@
 
 use std::{future::Future, sync::Arc};
 
-use axum::{
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
-};
+use axum::{http::StatusCode, response::Response};
 use futures_util::{StreamExt, stream};
 use litellm_gateway_auth::Authenticated;
 use litellm_llms_types::formats::chat_completions::ChatCompletionsUsage;
@@ -96,8 +93,8 @@ pub trait CallHooks: Send + Sync + 'static {
 
     fn post_call_success(&self) -> impl Future<Output = Result<(), HookError>> + Send;
 
-    /// The headers the callbacks add to the answer.
-    fn response_headers(&self) -> impl Future<Output = HeaderMap> + Send;
+    /// The callbacks add headers to the answer, which they write to the call's record.
+    fn response_headers(&self) -> impl Future<Output = ()> + Send;
 
     fn succeeded(&self, served: ServedCall) -> impl Future<Output = ()> + Send;
 
@@ -111,17 +108,16 @@ pub(crate) struct Answer {
     complete: Option<ServedCall>,
 }
 
-/// What the hooks made of a served call before its answer is rendered.
+/// What the hooks made of a served call before its answer is rendered. The headers they add are
+/// in the call's record, which `record::render` writes into the answer's head.
 pub(crate) struct Told {
-    added: HeaderMap,
     complete: Option<ServedCall>,
 }
 
 impl Told {
-    /// `response` with the headers the callbacks add.
-    pub(crate) fn answer(self, response: impl IntoResponse) -> Answer {
+    pub(crate) fn answer(self, response: Response) -> Answer {
         Answer {
-            response: (self.added, response).into_response(),
+            response,
             complete: self.complete,
         }
     }
@@ -171,18 +167,16 @@ pub(crate) async fn answered<E: Endpoint, K: CallHooks>(
 ) -> Result<Told, Ended> {
     let Some((chunks, read)) = E::held(outcome) else {
         hooks.post_call_success().await?;
+        hooks.response_headers().await;
         return Ok(Told {
-            added: hooks.response_headers().await,
             complete: Some(ServedCall {
                 model_group,
                 usage: E::counts(outcome).and_then(E::usage),
             }),
         });
     };
-    let told = Told {
-        added: hooks.response_headers().await,
-        complete: None,
-    };
+    hooks.response_headers().await;
+    let told = Told { complete: None };
     let hooks = hooks.clone();
     let usage: fn(Counts) -> Option<ChatCompletionsUsage> = E::usage;
     let unwatched = std::mem::replace(chunks, stream::empty().boxed());

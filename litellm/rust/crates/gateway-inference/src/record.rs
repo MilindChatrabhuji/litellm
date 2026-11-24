@@ -4,9 +4,11 @@
 //! record through [`read`] and [`write`] and never takes it as a parameter. A task spawned for the
 //! call keeps it through [`spawn_in_call`]. Each attempt runs in its own [`AttemptSeen`] through
 //! [`attempt`], which [`Recorder`] writes, and the route hands the served one to the record.
+//! [`render`] writes the answer's head from the record in one pass.
 
 mod attempt;
 mod entries;
+mod render;
 
 use std::{
     future::Future,
@@ -26,9 +28,10 @@ use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::task::{JoinHandle, futures::TaskLocalFuture};
 
+pub(crate) use self::render::render;
 pub use self::{
     attempt::{AttemptSeen, Recorder, ServedDeployment},
-    entries::{Ended, Entries},
+    entries::{Ended, Entries, HeadSent},
 };
 
 tokio::task_local! {
@@ -66,9 +69,10 @@ pub fn read<R>(look: impl FnOnce(&Entries) -> R) -> Option<R> {
         .ok()
 }
 
-/// Adds a header to the answer of the call this code runs in.
-pub fn add_header(name: impl Into<String>, value: impl Into<Value>) {
-    write(|entries| entries.add_header(name.into(), value.into()));
+/// Adds a header to the answer of the call this code runs in. Refused once the answer's head was
+/// written, which for a stream is before its first byte.
+pub fn add_header(name: impl Into<String>, value: impl Into<Value>) -> Result<(), HeadSent> {
+    write(|entries| entries.add_header(name.into(), value.into())).unwrap_or(Ok(()))
 }
 
 /// Runs `future` as one attempt of the call, and hands back what it saw next to its output. The
@@ -191,9 +195,9 @@ mod tests {
             .route(
                 "/",
                 get(|| async {
-                    add_header("x-handler", "yes");
+                    add_header("x-handler", "yes").unwrap();
                     let body = futures_util::stream::once(async {
-                        add_header("x-body", "yes");
+                        add_header("x-body", "yes").unwrap();
                         Ok::<_, std::convert::Infallible>(Bytes::from(added().unwrap().to_string()))
                     });
                     Body::from_stream(body)
@@ -223,7 +227,7 @@ mod tests {
     async fn a_task_spawned_in_a_call_writes_its_record() {
         let record = CallRecord::new();
         scope(record.clone(), async {
-            spawn_in_call(async { add_header("x-spawned", "yes") })
+            spawn_in_call(async { add_header("x-spawned", "yes").unwrap() })
                 .await
                 .unwrap();
         })
@@ -240,7 +244,7 @@ mod tests {
         struct Dropped;
         impl Drop for Dropped {
             fn drop(&mut self) {
-                add_header("x-dropped", "yes");
+                add_header("x-dropped", "yes").unwrap();
             }
         }
         let record = CallRecord::new();

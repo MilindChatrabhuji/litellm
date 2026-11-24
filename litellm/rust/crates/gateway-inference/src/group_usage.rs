@@ -12,7 +12,7 @@ use axum::{
 use litellm_redis_store::{Number, router_usage::Kind};
 use litellm_router_core::{Deployment, UsageWindow, health::current_minute};
 
-use crate::{Gateway, headers::Routing, routing::Host, routing_cache::counter};
+use crate::{Gateway, headers::Routing, record, routing::Host, routing_cache::counter};
 
 const TOKENS: [&str; 2] = ["x-ratelimit-remaining-tokens", "x-ratelimit-limit-tokens"];
 const REQUESTS: [&str; 2] = [
@@ -136,12 +136,13 @@ pub(crate) async fn told<H: Host>(
     next: Next,
 ) -> Response {
     let mut response = next.run(request).await;
-    let Some(group) = response
-        .extensions()
-        .get::<Routing>()
-        .and_then(Routing::counted_group)
-        .map(str::to_owned)
-    else {
+    let Some(group) = record::read(|entries| {
+        entries
+            .routing()
+            .and_then(Routing::counted_group)
+            .map(str::to_owned)
+    })
+    .flatten() else {
         return response;
     };
     for (name, value) in group_headers(&gateway, &group).await {

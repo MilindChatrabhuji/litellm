@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use axum::{
-    Extension,
     extract::FromRequestParts,
     http::{HeaderMap, request::Parts},
     response::Response,
@@ -110,14 +109,18 @@ where
         let model_group = routed.model_group;
         let mut outcome = routed.output.response;
         let seen = E::attempt(&mut outcome);
-        record::write(|entries| entries.routed(routing.clone(), deployment, seen));
+        record::write(|entries| entries.routed(routing, deployment, seen));
         let told = hooks::answered::<E, _>(&hooks, &mut outcome, model_group).await?;
-        Ok(told.answer((Extension(routing), E::render(outcome, reported)?)))
+        Ok(told.answer(E::render(outcome, reported)?))
     };
     record::write(|entries| entries.serve_as(E::CALL_TYPE));
     let served = match body {
         Ok(body) => hooks::around(gateway, identity, body, serve).await,
         Err(error) => Err(Ended::from(error)),
     };
-    served.unwrap_or_else(|ended| ended.response(E::ERRORS, call.request_id.as_deref()))
+    served.unwrap_or_else(|mut ended| {
+        let routing = ended.routing.take();
+        record::write(|entries| entries.answered_error(routing));
+        ended.response(E::ERRORS, call.request_id.as_deref())
+    })
 }

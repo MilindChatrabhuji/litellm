@@ -4289,7 +4289,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tower",
- "tower-http",
  "tracing",
  "wiremock",
 ]

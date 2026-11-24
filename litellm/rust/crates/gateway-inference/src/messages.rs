@@ -19,7 +19,7 @@ use litellm_router_core::{Attempt, Deployment, Op};
 use serde_json::{Map, Value};
 
 use crate::{
-    Error, Gateway, JsonObject, caching,
+    Error, Gateway, JsonObject,
     error::ErrorFormat,
     hooks::CallType,
     model_restamp::{ReportedModel, Stamp},
@@ -128,8 +128,10 @@ impl<H: Host> Endpoint for MessagesAttempt<'_, H> {
         let stream =
             Sse::<Messages, _, _>::new(Json, |error| Bytes::from(Error::from(error).sse_frame()));
         let ran = reported.answer(ran, message_start);
-        let response = litellm_host_http::render(stream, stream_outcome::bytes(ran))?;
-        Ok(caching::with_cache_key(response))
+        Ok(litellm_host_http::render(
+            stream,
+            stream_outcome::bytes(ran),
+        )?)
     }
 }
 

@@ -6,7 +6,7 @@ use litellm_callbacks::{
     CallFacts, CallKind, CallTarget, CallTiming, Field, FieldSet, FieldValues, Hook, HookInput,
     LoggedModelGroup, Outcome, PatchOp, Scalar, Usage, UsageRecord,
 };
-use litellm_gateway_inference::record::{Ended, Entries};
+use litellm_gateway_inference::record::{Ended, Entries, HeadSent};
 use litellm_llms_types::formats::chat_completions::ChatCompletionsUsage;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -26,6 +26,8 @@ pub enum Unwritable {
     Model(Value),
     #[error("{0:?} is part of the request body, which the route already has")]
     Routed(Field),
+    #[error(transparent)]
+    HeadSent(#[from] HeadSent),
 }
 
 fn record(value: impl Serialize) -> Option<Value> {
@@ -129,9 +131,11 @@ pub fn write(entries: &mut Entries, op: PatchOp) -> Result<(), Unwritable> {
         PatchOp::Merge {
             field: Field::ResponseHeaders,
             keys,
-        } => keys
-            .into_iter()
-            .for_each(|(name, value)| entries.add_header(name, value)),
+        } => {
+            for (name, value) in keys {
+                entries.add_header(name, value)?;
+            }
+        }
         PatchOp::Set {
             field: Field::Model,
             value: Value::String(model),
@@ -281,6 +285,26 @@ mod tests {
                 )
             }),
             Err(Unwritable::Routed(Field::OptionalParams))
+        );
+    }
+
+    #[rstest]
+    fn a_patch_to_the_headers_of_an_answer_whose_head_was_written_is_refused() {
+        assert_eq!(
+            on_a_call(|entries| {
+                entries.send_head();
+                (
+                    write(
+                        entries,
+                        PatchOp::Merge {
+                            field: Field::ResponseHeaders,
+                            keys: Map::from_iter([("x-late".to_owned(), json!("yes"))]),
+                        },
+                    ),
+                    entries.response_headers().is_empty(),
+                )
+            }),
+            (Err(Unwritable::HeadSent(HeadSent)), true)
         );
     }
 }

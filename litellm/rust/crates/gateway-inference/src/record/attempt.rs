@@ -78,6 +78,17 @@ impl AttemptSeen {
     pub(crate) fn stream_head(&mut self, headers: Vec<(String, String)>) {
         self.provider_headers = headers;
     }
+
+    /// An attempt served from the cached answer `key`.
+    #[cfg(test)]
+    pub(crate) fn cached(key: &str) -> Self {
+        Self {
+            source: Some(ResultSource::Cache {
+                key: key.to_owned(),
+            }),
+            ..Self::default()
+        }
+    }
 }
 
 /// The deployment that served a call, as the router registry and `routing::timeout` name it.

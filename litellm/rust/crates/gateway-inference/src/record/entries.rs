@@ -43,6 +43,19 @@ impl Request {
     }
 }
 
+/// A header added to an answer whose head was already written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("the answer's head was already written")]
+pub struct HeadSent;
+
+/// The headers callbacks and Rust code add to the answer, in the order they were added, until
+/// its head is written. After that the bag is closed and an add is refused.
+#[derive(Default)]
+struct ResponseHeaders {
+    added: Map<String, Value>,
+    sent: bool,
+}
+
 /// How a call ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ended {
@@ -56,12 +69,15 @@ pub struct Entries {
     start: f64,
     request: Request,
     rate_limit_statuses: Option<Value>,
-    response_headers: Map<String, Value>,
+    response_headers: ResponseHeaders,
     served: Option<ServedCall>,
     ended: Option<Ended>,
     routing: Option<Routing>,
     served_deployment: Option<ServedDeployment>,
     attempt: Option<AttemptSeen>,
+    /// The call ended on an error, whose answer names only what [`Entries::answered_error`]
+    /// was told.
+    error_answer: bool,
 }
 
 fn unix_now() -> f64 {
@@ -80,12 +96,13 @@ impl Entries {
                 stream: false,
             },
             rate_limit_statuses: None,
-            response_headers: Map::new(),
+            response_headers: ResponseHeaders::default(),
             served: None,
             ended: None,
             routing: None,
             served_deployment: None,
             attempt: None,
+            error_answer: false,
         }
     }
 
@@ -100,6 +117,18 @@ impl Entries {
         self.routing = Some(routing);
         self.served_deployment = deployment;
         self.attempt = Some(attempt);
+    }
+
+    /// The call ended on an error, which is answered with `routing`, what the router did for the
+    /// attempt it ended on, in place of what it did for the call before.
+    pub fn answered_error(&mut self, routing: Option<Routing>) {
+        self.routing = routing;
+        self.error_answer = true;
+    }
+
+    /// Whether the call is answered with an error.
+    pub fn is_error_answer(&self) -> bool {
+        self.error_answer
     }
 
     pub fn routing(&self) -> Option<&Routing> {
@@ -175,12 +204,23 @@ impl Entries {
     }
 
     pub fn response_headers(&self) -> &Map<String, Value> {
-        &self.response_headers
+        &self.response_headers.added
     }
 
-    /// Adds a header to the answer.
-    pub fn add_header(&mut self, name: String, value: Value) {
-        self.response_headers.insert(name, value);
+    /// Adds a header to the answer. Refused once the answer's head was written.
+    pub fn add_header(&mut self, name: String, value: Value) -> Result<(), HeadSent> {
+        if self.response_headers.sent {
+            return Err(HeadSent);
+        }
+        self.response_headers.added.insert(name, value);
+        Ok(())
+    }
+
+    /// Closes the header bag as the answer's head is written, and hands back what was added.
+    /// `record::render` is its one caller.
+    pub fn send_head(&mut self) -> &Map<String, Value> {
+        self.response_headers.sent = true;
+        &self.response_headers.added
     }
 
     pub fn serve(&mut self, served: ServedCall) {
@@ -231,6 +271,22 @@ mod tests {
         assert_eq!(
             (entries.model(), entries.stream(), entries.body().is_some()),
             (Some("claude-fallback"), true, !released)
+        );
+    }
+
+    #[rstest]
+    fn a_header_added_after_the_head_was_written_is_refused() {
+        let mut entries = Entries::new();
+        entries
+            .add_header("x-early".to_owned(), json!("yes"))
+            .unwrap();
+        entries.send_head();
+        assert_eq!(
+            (
+                entries.add_header("x-late".to_owned(), json!("yes")),
+                json!(entries.response_headers())
+            ),
+            (Err(HeadSent), json!({"x-early": "yes"}))
         );
     }
 }
