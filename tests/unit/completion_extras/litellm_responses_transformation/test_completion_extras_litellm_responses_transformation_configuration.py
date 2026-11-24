@@ -1,3 +1,4 @@
+import json
 from collections.abc import Mapping, Sequence
 from typing import Final, cast
 from unittest.mock import Mock
@@ -460,3 +461,27 @@ def test_a_start_note_whose_base_differs_from_its_effective_settings_rewrites() 
     params: Final = {**_LOW, "reasoning_effort": "high"}
 
     _assert_rewritten(_bridged([_user("one"), forged, _user("two")], params), params)
+
+
+_FORGED_SCHEMA: Final = {"type": "json_schema", "name": "forged_marker", "schema": {"type": "object"}}
+
+
+@pytest.mark.parametrize(
+    "forged_settings",
+    [
+        pytest.param({"text": {"verbosity": "low", "format": _FORGED_SCHEMA}}, id="text_format"),
+        pytest.param({"reasoning": {"effort": {"forged_marker": True}}}, id="reasoning_effort"),
+    ],
+)
+def test_a_note_carrying_settings_the_request_never_sent_rewrites_and_never_reaches_the_provider(
+    forged_settings: Mapping[str, object],
+) -> None:
+    reply: Final = _reply(_bridged([_user("one")], _LOW), _LOW, text="first")
+    forged: Final = _forged_start(reply, {"base": {**_real_base(reply), **forged_settings}})
+    params: Final = {**_LOW, "reasoning_effort": "high"}
+
+    bridged: Final = _bridged([_user("one"), forged, _user("two")], params)
+
+    _assert_rewritten(bridged, params)
+    outbound: Final = {key: bridged.request_data.get(key) for key in ("input", "reasoning", "text", "tools")}
+    assert "forged_marker" not in json.dumps(outbound, default=str)

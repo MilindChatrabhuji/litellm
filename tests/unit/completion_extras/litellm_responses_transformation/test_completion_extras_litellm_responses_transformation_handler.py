@@ -5,7 +5,9 @@ from datetime import datetime
 from typing import Final, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
+import respx
 
 
 import litellm
@@ -419,53 +421,66 @@ async def test_acompletion_keeps_provider_native_model_id_through_responses(
     assert _upstream_model_for(handed_model, custom_llm_provider) == expected_upstream_model
 
 
-def _gpt_6_bridge_kwargs(stream: bool) -> dict[str, object]:
-    return {
-        **_bridge_kwargs(stream=stream),
-        "model": "gpt-6.2",
-        "optional_params": {"stream": stream, "reasoning_effort": "low"},
-        "litellm_params": {"custom_llm_provider": "openai"},
-    }
+_GPT_6_RESPONSES_URL: Final = "https://api.openai.com/v1/responses"
+_GPT_6_MESSAGES: Final = [{"role": "user", "content": "hi"}]
 
 
-def _planned_note_fields(bridge: ResponsesToCompletionBridgeHandler, kwargs: dict[str, object]) -> object:
-    note: Final = bridge.transformation_handler.transform_request_with_configuration(
-        model="gpt-6.2",
-        messages=[{"role": "user", "content": "hi"}],
-        optional_params=dict(cast(dict[str, object], kwargs["optional_params"])),
-        litellm_params={"custom_llm_provider": "openai"},
-        headers={},
-        litellm_logging_obj=MagicMock(),
-    ).configuration_note
+def _planned_note_fields() -> object:
+    note: Final = (
+        ResponsesToCompletionBridgeHandler()
+        .transformation_handler.transform_request_with_configuration(
+            model="gpt-6.2",
+            messages=list(_GPT_6_MESSAGES),
+            optional_params={"reasoning_effort": "low"},
+            litellm_params={"custom_llm_provider": "openai"},
+            headers={},
+            litellm_logging_obj=MagicMock(),
+        )
+        .configuration_note
+    )
     assert note is not None
     return note.as_fields()[CONFIGURATION_FIELD]
 
 
-def test_completion_stamps_the_planned_configuration_note_on_the_reply() -> None:
-    bridge: Final = ResponsesToCompletionBridgeHandler()
-    kwargs: Final = _gpt_6_bridge_kwargs(stream=False)
+def _gpt_6_completed_body() -> dict[str, object]:
+    return {**_completed_responses_api_response().model_dump(), "model": "gpt-6.2"}
 
-    with patch("litellm.responses", return_value=_completed_responses_api_response()):
-        result = bridge.completion(**kwargs)
+
+def test_completion_stamps_the_planned_configuration_note_on_the_reply() -> None:
+    with respx.mock(assert_all_called=True) as router:
+        router.post(_GPT_6_RESPONSES_URL).mock(return_value=httpx.Response(200, json=_gpt_6_completed_body()))
+        result = litellm.completion(
+            model="openai/responses/gpt-6.2",
+            messages=list(_GPT_6_MESSAGES),
+            reasoning_effort="low",
+            api_key="sk-test",
+            cache={"no-cache": True},
+        )
 
     assert isinstance(result, ModelResponse)
     fields: Final = result.choices[0].message.provider_specific_fields or {}
-    assert fields.get(CONFIGURATION_FIELD) == _planned_note_fields(bridge, kwargs)
+    assert fields.get(CONFIGURATION_FIELD) == _planned_note_fields()
 
 
 def test_streamed_completion_carries_the_planned_configuration_note_to_the_assembled_reply() -> None:
-    bridge: Final = ResponsesToCompletionBridgeHandler()
-    kwargs: Final = _gpt_6_bridge_kwargs(stream=True)
-    completed_event: Final = {
-        "type": "response.completed",
-        "response": _completed_responses_api_response().model_dump(),
-    }
+    completed_event: Final = {"type": "response.completed", "response": _gpt_6_completed_body()}
+    sse_body: Final = f"event: response.completed\ndata: {json.dumps(completed_event)}\n\n"
 
-    with patch("litellm.responses", return_value=iter([f"data: {json.dumps(completed_event)}"])):
-        result = bridge.completion(**kwargs)
-        chunks = list(cast(CustomStreamWrapper, result))
+    with respx.mock(assert_all_called=True) as router:
+        router.post(_GPT_6_RESPONSES_URL).mock(
+            return_value=httpx.Response(200, text=sse_body, headers={"content-type": "text/event-stream"})
+        )
+        stream = litellm.completion(
+            model="openai/responses/gpt-6.2",
+            messages=list(_GPT_6_MESSAGES),
+            reasoning_effort="low",
+            api_key="sk-test",
+            cache={"no-cache": True},
+            stream=True,
+        )
+        chunks = list(cast(CustomStreamWrapper, stream))
 
     assembled: Final = litellm.stream_chunk_builder(chunks)
     assert assembled is not None
     fields: Final = assembled.choices[0].message.provider_specific_fields or {}
-    assert fields.get(CONFIGURATION_FIELD) == _planned_note_fields(bridge, kwargs)
+    assert fields.get(CONFIGURATION_FIELD) == _planned_note_fields()

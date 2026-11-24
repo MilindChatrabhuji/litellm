@@ -2,7 +2,6 @@ import hashlib
 import json
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from itertools import takewhile
 from types import MappingProxyType
 from typing import Final, Literal, TypeAlias
 
@@ -304,12 +303,9 @@ def _transition_items(
     return (*((update,) if update is not None else ()), *added)
 
 
-def _is_tool_message(message: _Message) -> bool:
-    return message.role == "tool"
-
-
 def _transition_end(messages: Sequence[_Message], index: int) -> int:
-    return index + sum(1 for _ in takewhile(_is_tool_message, messages[index + 1 :]))
+    following: Final = range(index + 1, len(messages))
+    return next((position - 1 for position in following if messages[position].role != "tool"), len(messages) - 1)
 
 
 def _top_level(base: Settings, definitions: Mapping[str, Mapping[str, object]]) -> Mapping[str, object]:
@@ -326,6 +322,16 @@ def _effort(settings: Settings) -> object:
     return (settings.reasoning or {}).get("effort")
 
 
+def _trusted(stored: Settings, requested: Settings) -> bool:
+    effort: Final = _effort(stored)
+    stored_format: Final = _text_format(stored.text)
+    return (
+        (effort is None or isinstance(effort, str))
+        and stored_format is not None
+        and stored_format in (_default_text_format(), _text_format(requested.text))
+    )
+
+
 def _inline(
     messages: Sequence[_Message],
     requested: Settings,
@@ -337,6 +343,8 @@ def _inline(
     if segment is None:
         return None
     if samples and _effort(segment[0].note.base) != _effort(requested):
+        return None
+    if not all(_trusted(stamped.note.in_effect(), requested) for stamped in segment):
         return None
     transitions: Final = _transitions((*(stamped.note.in_effect() for stamped in segment), requested))
     if transitions is None:

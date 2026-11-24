@@ -2546,6 +2546,7 @@ class OpenAiResponsesToChatCompletionStreamIterator(BaseModelResponseIterator):
             structured_output: Only the first message item became content
             item_phase: Phase of the message item this chunk belongs to
             reasoning_summary_streamed: Whether earlier chunks already streamed reasoning summary text
+            configuration_note: Settings note stamped on the terminal chunk for the next turn to replay
 
         Returns:
             ModelResponseStream: OpenAI-formatted streaming chunk
