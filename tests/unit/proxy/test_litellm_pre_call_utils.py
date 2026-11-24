@@ -8685,6 +8685,80 @@ async def test_semantic_cache_uses_authenticated_policy_and_reports_scope(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "key_metadata, user_enabled, team_enabled, controls, scope, uses_cache",
+    [
+        pytest.param(
+            {"cache_params": {"similarity_threshold": 0}},
+            None,
+            False,
+            {"use-cache": True},
+            "team",
+            False,
+            id="team-disables",
+        ),
+        pytest.param(None, True, False, {}, "user", True, id="user-enables"),
+        pytest.param(
+            {"cache_params": {"enabled": False}}, True, True, {"use-cache": True}, "key", False, id="key-disables"
+        ),
+        pytest.param({"cache_params": {"enabled": True}}, False, False, {}, "key", True, id="key-enables"),
+        pytest.param(
+            {"cache": {"use-cache": False}}, None, True, {"use-cache": True}, "team", False, id="legacy-key-opt-out"
+        ),
+        pytest.param(
+            {"cache": {"use-cache": False}},
+            None,
+            True,
+            {},
+            "team",
+            False,
+            id="legacy-key-opt-out-without-request-control",
+        ),
+        pytest.param(None, None, None, {"use-cache": True}, None, True, id="legacy-opt-in"),
+        pytest.param(None, None, None, {}, None, False, id="global-default-off"),
+    ],
+)
+async def test_exact_cache_resolves_authenticated_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    key_metadata: dict[str, object] | None,
+    user_enabled: bool | None,
+    team_enabled: bool | None,
+    controls: dict[str, object],
+    scope: str | None,
+    uses_cache: bool,
+) -> None:
+    from litellm.caching.caching import DualCache
+    from litellm.proxy.common_request_processing import ProxyBaseLLMRequestProcessing
+    from litellm.proxy.hooks.cache_control_check import PROXY_CacheControlCheck
+    from litellm.types.semantic_cache import SemanticCacheParams
+
+    cache: Final = Cache(type=LiteLLMCacheType.LOCAL, mode=CacheMode.default_off)
+    monkeypatch.setattr(litellm, "cache", cache)
+    key: Final = UserAPIKeyAuth(
+        api_key="hashed-key",
+        metadata=key_metadata or {},
+        allowed_cache_controls=["no-cache", "no-store"]
+        if key_metadata is not None and "cache" in key_metadata
+        else None,
+        user_semantic_cache_params=(SemanticCacheParams(enabled=user_enabled) if user_enabled is not None else None),
+        team_metadata={"cache_params": {"enabled": team_enabled}},
+    )
+    updated: Final = await add_litellm_data_to_request(
+        data={"model": "gpt-6.1-sol", "cache": controls},
+        request=_callback_credential_request_mock(),
+        user_api_key_dict=key,
+        proxy_config=MagicMock(),
+        general_settings={},
+        version="test-version",
+    )
+    await PROXY_CacheControlCheck().async_pre_call_hook(key, DualCache(), updated, "completion")
+
+    headers: Final = ProxyBaseLLMRequestProcessing.get_custom_headers(user_api_key_dict=key, request_data=updated)
+    assert headers.get("x-litellm-cache-scope") == scope
+    assert cache.should_use_cache(**updated) is uses_cache
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "allowed_cache_controls, request_cache, expected_cache",
     [
         pytest.param(["no-store"], {"use-cache": True}, {"ttl": 600}, id="opt-in-not-allowed-is-replaced"),
@@ -12254,7 +12328,10 @@ def test_pre_call_served_model_applies_aliases_in_request_preparation_order(
 def test_request_served_model_ignores_a_malformed_alias_like_request_preparation_does(
     token_fields: dict[str, object], expected: str
 ) -> None:
-    from litellm.proxy.litellm_pre_call_utils import _update_model_if_key_alias_exists, _update_model_if_team_alias_exists
+    from litellm.proxy.litellm_pre_call_utils import (
+        _update_model_if_key_alias_exists,
+        _update_model_if_team_alias_exists,
+    )
     from litellm.proxy.litellm_pre_call_utils import request_served_model
 
     valid_token: Final = UserAPIKeyAuth(**token_fields)
